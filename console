@@ -1,0 +1,115 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * KallioMicro Console Entry Point
+ *
+ * Usage:
+ *   php console <command> [arguments] [options]
+ *
+ * Examples:
+ *   php console list                    - List all commands
+ *   php console help <command>          - Show help for a command
+ *   php console schedule:run            - Run scheduled tasks
+ *   php console schedule:run --list     - Show scheduled tasks
+ *   php console task:backup             - Run a specific task
+ */
+
+// Ensure CLI environment
+if (PHP_SAPI !== 'cli') {
+    echo "This script must be run from the command line.\n";
+    exit(1);
+}
+
+// Define base path
+define('KALLIOMICRO_BASE_PATH', __DIR__);
+
+// Composer autoload
+$autoloadPaths = [
+    __DIR__ . '/vendor/autoload.php',
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../vendor/autoload.php',
+];
+
+$autoloaded = false;
+foreach ($autoloadPaths as $path) {
+    if (file_exists($path)) {
+        require $path;
+        $autoloaded = true;
+        break;
+    }
+}
+
+if (!$autoloaded) {
+    echo "Composer autoload not found. Run 'composer install' first.\n";
+    exit(1);
+}
+
+// Load environment using native DotEnv
+use KallioMicro\Support\DotEnv;
+DotEnv::create(__DIR__)->safeLoad();
+
+// Load helpers
+if (file_exists(__DIR__ . '/src/Support/helpers.php')) {
+    require __DIR__ . '/src/Support/helpers.php';
+}
+
+use KallioMicro\Core\Application;
+use KallioMicro\Core\Container;
+use KallioMicro\Console\Console;
+use KallioMicro\Support\Logger;
+use KallioMicro\Support\ExceptionHandler;
+
+// Bootstrap application
+try {
+    // Create container
+    $container = new Container();
+
+    // Create application
+    $app = new Application($container, __DIR__);
+
+    // Create logger (file-only for CLI)
+    $logger = new Logger(
+        null,
+        __DIR__ . '/storage/logs/console.log',
+        'core_logs',
+        'console'
+    );
+    $logger->setFileOnly(true);
+
+    // Register exception handler
+    $exceptionHandler = new ExceptionHandler(
+        $logger,
+        null,
+        env('APP_DEBUG', false)
+    );
+    $exceptionHandler->register();
+
+    // Create console application
+    $console = new Console($app, $logger);
+
+    // Register application commands
+    // Add your custom commands here:
+    // $console->registerClass(\App\Console\Commands\BackupCommand::class);
+    // $console->registerClass(\App\Console\Commands\SyncCommand::class);
+
+    // Register scheduled tasks
+    // $console->schedule('task:backup', '0 2 * * *');      // Daily at 2:00 AM
+    // $console->schedule('task:cleanup', '0 * * * *');     // Every hour
+
+    // Run console
+    $exitCode = $console->run($argv);
+
+    exit($exitCode);
+
+} catch (\Throwable $e) {
+    fwrite(STDERR, "\033[31mError: " . $e->getMessage() . "\033[0m\n");
+
+    if (env('APP_DEBUG', false)) {
+        fwrite(STDERR, "\n" . $e->getTraceAsString() . "\n");
+    }
+
+    exit(1);
+}
