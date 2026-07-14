@@ -600,7 +600,13 @@ const KallioMicro = (function() {
                 dt.rows.add(data);
             }
             dt.draw();
+            return;
         }
+
+        // No DataTables loaded: fall back to a full page reload so
+        // refresh_table always reflects new state instead of silently
+        // doing nothing. Prefer the replace action for partial updates.
+        window.location.reload();
     }
 
     function addTableRows(selector, rowsHtml) {

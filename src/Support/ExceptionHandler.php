@@ -381,15 +381,21 @@ HTML;
     /**
      * Get HTTP status code for exception
      */
-    private function getHttpCode(\Throwable $e): int
+    public function getHttpCode(\Throwable $e): int
     {
         if ($e instanceof \KallioMicro\Http\HttpException) {
             return $e->getStatusCode();
         }
 
+        // Honor an explicit HTTP status carried in the exception code
+        // (e.g. RuntimeException('CSRF token mismatch', 403)).
+        $code = $e->getCode();
+        if (is_int($code) && $code >= 400 && $code <= 599) {
+            return $code;
+        }
+
         return match (true) {
             $e instanceof \InvalidArgumentException => 400,
-            $e instanceof \RuntimeException => 500,
             default => 500,
         };
     }

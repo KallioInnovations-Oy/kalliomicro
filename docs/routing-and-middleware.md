@@ -146,9 +146,9 @@ protected function back(): Response
 protected function table(string $table): QueryBuilder
 ```
 
-**Every state-changing method (store/update/destroy) calls `$this->requireCsrf()` as its first line.**
+**Every state-changing method (store/update/destroy) calls `$this->requireCsrf()` as its first line.** It throws `RuntimeException('CSRF token mismatch', 403)`, which the exception handler renders as a proper 403. An empty `csrf_token` field never shadows the `X-CSRF-Token` header (both `verifyCsrf()` and `CsrfMiddleware` fall through on null *or* empty).
 
-⚠ Caveats (as of 2026-07-14): `requireCsrf()` throws `RuntimeException('CSRF token mismatch', 403)`, but the exception handler maps plain `RuntimeException` to **500** (see [overview.md](overview.md)) — prefer route-level `CsrfMiddleware` for a proper 403, or throw `HttpException::forbidden()`. `back()` redirects to the raw `Referer` header (default `/`) — it does not verify same-origin; don't use it after security-sensitive actions.
+⚠ Caveat (as of 2026-07-14): `back()` redirects to the raw `Referer` header (default `/`) — it does not verify same-origin; don't use it after security-sensitive actions.
 
 There are **no** `can()` / `hasRole()` / `authorize()` helpers on the controller — role checks go through the session user (`$this->user()['roles']`) or route-level `RoleMiddleware`; permission systems are a downstream concern.
 

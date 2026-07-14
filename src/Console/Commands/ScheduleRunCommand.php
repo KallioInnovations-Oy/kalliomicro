@@ -12,6 +12,11 @@ use KallioMicro\Console\Input;
  *
  * This command should be called every minute by cron:
  * * * * * * php /path/to/console schedule:run >> /dev/null 2>&1
+ *
+ * Scope: due tasks run inline, sequentially, with NO overlap protection —
+ * the base scheduler assumes fast, idempotent tasks on a single host. A
+ * task that can outlive its schedule interval must acquire its own lock
+ * inside handle() (see Console::schedule() for the pattern).
  */
 class ScheduleRunCommand extends Command
 {

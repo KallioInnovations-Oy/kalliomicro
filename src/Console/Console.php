@@ -79,6 +79,12 @@ class Console
 
     /**
      * Schedule a command to run on a cron schedule
+     *
+     * Policy note: schedule:run provides NO overlap protection — a task that
+     * runs longer than its interval gets a second concurrent instance on the
+     * next tick. Slow or non-idempotent tasks must take their own lock (e.g.
+     * MySQL GET_LOCK held by the DB connection, which auto-releases if the
+     * process dies) at the start of handle().
      */
     public function schedule(string $commandName, string $cronExpression): self
     {

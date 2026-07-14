@@ -80,10 +80,14 @@ class CsrfMiddleware extends Middleware
      */
     private function verifyToken(Request $request): bool
     {
-        $token = $request->input('csrf_token')
-            ?? $request->header('x-csrf-token');
+        // An empty csrf_token field must not shadow the X-CSRF-Token header
+        // the JS client sends on every mutating request.
+        $token = $request->input('csrf_token');
+        if ($token === null || $token === '') {
+            $token = $request->header('x-csrf-token');
+        }
 
-        if ($token === null) {
+        if ($token === null || $token === '') {
             return false;
         }
 

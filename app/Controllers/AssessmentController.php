@@ -121,6 +121,18 @@ class AssessmentController extends Controller
             return ApiResponse::notFound('Assessment not found')->toResponse();
         }
 
+        // AJAX (the table's View button) gets a read-only modal;
+        // plain API clients still get the data envelope below.
+        if ($this->isAjax()) {
+            $content = $this->renderPartial('assessments.detail', [
+                'assessment' => $assessment,
+            ]);
+
+            return ApiResponse::success()
+                ->modal($content, 'lg')
+                ->toResponse();
+        }
+
         if ($this->wantsJson()) {
             return ApiResponse::success()
                 ->withData(['assessment' => $assessment])
@@ -175,8 +187,8 @@ class AssessmentController extends Controller
             return ApiResponse::notFound('Assessment not found')->toResponse();
         }
 
-        // Check permission (user owns it or is admin)
-        if ($assessment['user_id'] != $this->userId() && $this->session->getProfileId() != 1) {
+        // Check permission (user owns it or is admin) — strict comparison, always
+        if ((int) $assessment['user_id'] !== $this->userId() && $this->session->getProfileId() !== 1) {
             return ApiResponse::forbidden('You cannot edit this assessment')->toResponse();
         }
 
@@ -225,8 +237,8 @@ class AssessmentController extends Controller
             return ApiResponse::notFound('Assessment not found')->toResponse();
         }
 
-        // Check permission
-        if ($assessment['user_id'] != $this->userId() && $this->session->getProfileId() != 1) {
+        // Check permission — strict comparison, always
+        if ((int) $assessment['user_id'] !== $this->userId() && $this->session->getProfileId() !== 1) {
             return ApiResponse::forbidden('You cannot delete this assessment')->toResponse();
         }
 

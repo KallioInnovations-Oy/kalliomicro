@@ -89,6 +89,11 @@ class AuthManager
     /**
      * Attempt authentication with a specific provider
      *
+     * Policy note: the base framework ships NO login throttling — there is no
+     * attempt counter or lockout here. A deployment exposing a login form
+     * publicly wraps this call with its own rate limiting (attempt table
+     * keyed on ip+username, or infrastructure-level controls).
+     *
      * @param array<string, mixed> $credentials
      */
     public function attemptWith(string $provider, array $credentials): AuthResult
@@ -152,6 +157,13 @@ class AuthManager
 
     /**
      * Handle OAuth callback
+     *
+     * Policy note: on success this logs the PROVIDER's user straight into the
+     * session. If your deployment requires pre-provisioned accounts (SSO
+     * users must already exist locally), do not use this default flow as-is —
+     * resolve the provider identity to a local user record in your auth
+     * controller and call Session::login() with the LOCAL user only, so a
+     * tenant-valid but un-provisioned identity never gets a session.
      *
      * @param array<string, mixed> $params
      */

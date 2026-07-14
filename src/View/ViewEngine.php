@@ -27,9 +27,14 @@ class ViewEngine
     private array $composers = [];
 
     /** @var string[] */
-    private array $extensions = ['.php', '.html.php', '.twig'];
+    private array $extensions = ['.php', '.html.php'];
 
     private ?string $currentLayout = null;
+
+    private ?string $locale = null;
+
+    /** @var array<string, string>|null Lazily loaded translation map */
+    private ?array $translations = null;
 
     /** @var array<string, string> */
     private array $sections = [];
@@ -54,6 +59,10 @@ class ViewEngine
     public function render(string $template, array $data = []): string
     {
         $path = $this->resolvePath($template);
+
+        // Each page render starts with a clean slate — otherwise sections
+        // captured by an earlier render (e.g. 'scripts') leak into this one.
+        $this->sections = [];
 
         // Merge shared data
         $data = array_merge($this->shared, $data);
@@ -335,14 +344,64 @@ class ViewEngine
      */
     public function t(string $key, array $params = []): string
     {
-        // TODO: Implement translation lookup
-        $text = $key;
+        $this->translations ??= $this->loadTranslations();
+
+        // A missing key renders the key itself — ugly but findable in the UI,
+        // which beats a silent fallback that hides the gap.
+        $text = $this->translations[$key] ?? $key;
 
         foreach ($params as $name => $value) {
             $text = str_replace(":{$name}", (string) $value, $text);
         }
 
         return $text;
+    }
+
+    /**
+     * Set the active locale (clears the translation cache)
+     */
+    public function setLocale(string $locale): void
+    {
+        $this->locale = $locale;
+        $this->translations = null;
+    }
+
+    public function getLocale(): string
+    {
+        if ($this->locale !== null) {
+            return $this->locale;
+        }
+
+        return function_exists('config') ? (string) config('app.locale', 'en') : 'en';
+    }
+
+    /**
+     * Load translations from resources/lang/{locale}.json
+     *
+     * Files are FLAT JSON maps — the whole dot-namespaced key is one JSON key
+     * ("common.save": "Save"). Fallback-locale strings load first; the active
+     * locale overrides key by key. Missing files are fine (empty map).
+     *
+     * @return array<string, string>
+     */
+    private function loadTranslations(): array
+    {
+        $langPath = dirname($this->viewPath) . '/lang';
+        $locale = $this->getLocale();
+        $fallback = function_exists('config') ? (string) config('app.fallback_locale', 'en') : 'en';
+
+        $load = static function (string $loc) use ($langPath): array {
+            $file = "{$langPath}/{$loc}.json";
+            if (!is_file($file)) {
+                return [];
+            }
+            $decoded = json_decode((string) file_get_contents($file), true);
+            return is_array($decoded) ? $decoded : [];
+        };
+
+        $translations = $fallback !== $locale ? $load($fallback) : [];
+
+        return array_merge($translations, $load($locale));
     }
 
     /**

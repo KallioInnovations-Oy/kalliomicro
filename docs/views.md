@@ -7,7 +7,7 @@
 
 ## ViewEngine
 
-Constructed by the Application as a singleton (alias `'view'`) with `resources/views` as the view path. Template names use dot notation: `assessments.form` → `resources/views/assessments/form.php`. Extensions tried: `.php`, `.html.php`, `.twig` — ⚠ the `.twig` entry is vestigial (files are `include`d as PHP; there is no Twig engine), as is the constructor's `$cachePath` (no template caching exists).
+Constructed by the Application as a singleton (alias `'view'`) with `resources/views` as the view path. Template names use dot notation: `assessments.form` → `resources/views/assessments/form.php`. Extensions tried: `.php`, `.html.php`. (The constructor's `$cachePath` parameter is currently unused — templates are plain PHP includes, nothing is compiled or cached.)
 
 ### Render flow and layout inheritance
 
@@ -19,10 +19,12 @@ Constructed by the Application as a singleton (alias `'view'`) with `resources/v
 <?php $view->endSection(); ?>
 ```
 
-`render()` merges shared data under the call data (call data wins), runs registered composers, renders the template, and — if the template called `extends()` — renders the layout with the child's output injected as **`$content`**. The shipped layout emits the body via `<?= $content ?>` and uses `yield()` only for the optional `styles`/`scripts` blocks:
+`render()` starts each page with a **clean sections slate** (a previous render's captured sections never leak into the next), merges shared data under the call data (call data wins), runs registered composers, renders the template, and — if the template called `extends()` — renders the layout with the child's *direct* output injected as `$content`.
+
+**Layouts must emit the body via `$view->yield('content', $content ?? '')`, never bare `$content`.** A section-based page captures its entire body into the `content` section, leaving the direct output (and therefore `$content`) empty — a layout echoing bare `$content` renders section-based pages blank. The `$content` argument is only the fallback for templates that emit output without sections:
 
 ```php
-<main class="container py-4"><?= $content ?></main>
+<main class="container py-4"><?= $view->yield('content', $content ?? '') ?></main>
 …
 <?= $view->yield('scripts') ?>
 ```
@@ -49,9 +51,18 @@ $view->js($value)    // json_encode with HEX_TAG|HEX_APOS|HEX_QUOT|HEX_AMP — i
 
 (`flash` is injected as data only.) If you render through the engine directly (not via a controller), `share()` these yourself.
 
-### Translations — `t()` is a stub
+### Translations — `t()`
 
-`t(string $key, array $params = []): string` currently returns the **key itself** with `:name` placeholders substituted — there is no lookup, no language files, no locale handling (`app.locale` is ignored). The placeholder syntax (`:name`) is the contract downstream translation implementations must keep. Write user-facing text through `t()` anyway if your project will add translations later; otherwise plain strings are fine at this scale.
+```php
+$view->t('greet.hello', ['name' => 'World'])   // "Hello World"
+```
+
+- Files: `resources/lang/{locale}.json` — **flat** JSON maps whose keys are the full dot-namespaced strings (`"common.save": "Save"`). Missing files are fine (empty map).
+- Placeholders are **`:name`**, substituted by plain string replace.
+- Locale: `setLocale()` / `getLocale()` (default `config('app.locale')`). Fallback-locale strings (`config('app.fallback_locale')`, default `en`) load first; the active locale overrides key by key.
+- A **missing key renders the key itself** — ugly but findable in the UI, which beats a silent fallback that hides the gap. Don't wrap `t()` calls in fallback strings.
+
+The base ships no language files — the demo uses plain English strings. Projects that need i18n add `resources/lang/*.json` and route user-facing text through `t()`.
 
 ### Formatting and attribute helpers
 
@@ -82,9 +93,7 @@ The shipped layout provides everything the client contract needs:
 
 ## Shipped views
 
-`layouts/app.php`, `home.php`, `dashboard.php`, `auth/login.php`, `assessments/index.php`, `assessments/form.php` — the assessments pair demonstrates the full data-action + ApiResponse modal CRUD flow (see [api-response.md](api-response.md)).
-
-⚠ Known demo gap (as of 2026-07-14): `AssessmentController` also references `assessments.create`, `assessments.edit`, `assessments.show`, and `assessments.partials.table-rows`, which do not exist — those controller paths throw `View not found` until the views are added.
+`layouts/app.php`, `home.php`, `dashboard.php`, `auth/login.php`, and the complete assessments demo: `index.php`, `form.php` (create/edit modal content), `detail.php` (read-only modal content), `create.php` / `edit.php` / `show.php` (full-page fallbacks embedding the same partials), and `partials/table-rows.php` — the table body shared by the index page and the AJAX search endpoint so the two render identical markup. Together they demonstrate the full data-action + ApiResponse modal CRUD flow (see [api-response.md](api-response.md)).
 
 ## Static assets
 

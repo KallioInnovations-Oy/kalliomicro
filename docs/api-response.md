@@ -71,7 +71,7 @@ Every builder has a working client handler. Payload column = fields the client c
 | `nestedModal($content, $size = 'md', $level = 2)` | `content`, `size`, `level` | Stacked modal; z-index per level (1–3 styled by the layout) |
 | `closeModal($level = null)` | `level` | Closes that level, or the topmost |
 | `closeAllModals()` | — | Closes everything |
-| `refreshTable($target, $data = null)` | `target`, `data` | ⚠ jQuery + DataTables only — see below |
+| `refreshTable($target, $data = null)` | `target`, `data` | DataTables redraw if loaded; otherwise full page reload — see below |
 | `addTableRows($target, $rows)` | `target`, `rows` | Inserts HTML into `{target} tbody` |
 | `clearForm($target)` | `target` | Empties inputs (skips hidden/submit/button) |
 | `resetForm($target)` | `target` | Native `form.reset()` |
@@ -88,7 +88,7 @@ Every builder has a working client handler. Payload column = fields the client c
 Notes:
 
 - **Modal sizes:** `size` becomes the Bootstrap dialog class `modal-{size}` — only `sm`, `lg`, `xl` are real Bootstrap classes; `md` (default width) and `full` are effectively no-ops.
-- ⚠ **`refresh_table` requires jQuery + DataTables**, which the shipped layout does *not* load — out of the box it is a silent no-op. Prefer `replace('#table tbody', $rowsHtml)` (the pattern the demo `AssessmentController::search()` uses), or add jQuery+DataTables and initialize the table.
+- **`refresh_table` semantics:** with jQuery + DataTables loaded, the table redraws in place; without them (the shipped layout loads neither) it falls back to a **full page reload** so state is always reflected. For partial updates without a reload, prefer `replace('#table tbody', $rowsHtml)` — the pattern the demo `AssessmentController::search()` uses.
 - ⚠ **`validationError()` field errors are not rendered per-field** by the stock client — `data.validation_errors` is ignored; only the message is flashed. The client's own `validateForm()` pre-checks `[required]` fields before submitting. Render server-side errors yourself (re-render the form partial via `replace`/`modal`) or extend the client.
 
 ---
@@ -165,4 +165,4 @@ public function store(Request $request): Response
 2. Every chain ends with `->toResponse()`.
 3. Keep `resources/assets/js/kalliomicro.js` and `public/assets/js/kalliomicro.js` identical — the `public/` copy is what browsers load.
 4. Never hand-roll CSRF headers — the client injects them on every mutating request.
-5. Prefer `replace()` over `refresh_table` unless the project actually ships DataTables.
+5. Prefer `replace()` over `refresh_table` when a partial update suffices — without DataTables, `refresh_table` costs a full page reload.

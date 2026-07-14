@@ -11,6 +11,11 @@ use KallioMicro\Core\Config;
  *
  * Handles session lifecycle, CSRF protection, and user authentication state.
  * Implements security best practices for session handling.
+ *
+ * Storage scope: native PHP file sessions. A multi-replica deployment
+ * (load-balanced containers with ephemeral disks) must register its own
+ * SessionHandlerInterface via session_set_save_handler() BEFORE start(),
+ * or sessions will randomly vanish across replicas.
  */
 class Session
 {
@@ -362,7 +367,19 @@ class Session
     // Impersonation
 
     /**
-     * Start impersonating another user
+     * Start impersonating another user — MECHANISM ONLY, no authorization here
+     *
+     * The base framework does not know which role model a deployment uses,
+     * so this method performs NO permission check: it swaps the session user
+     * for whatever array it is given. The caller MUST gate it first, e.g.:
+     *
+     *     if (!in_array('admin', $session->getUserRoles(), true)) {
+     *         throw HttpException::forbidden();
+     *     }
+     *     $session->impersonate($targetUser);
+     *
+     * Note also that role/profile middleware sees the IMPERSONATED user —
+     * keep the stop-impersonating route outside any role-gated group.
      *
      * @param array<string, mixed> $user
      */
@@ -424,10 +441,41 @@ class Session
 
     /**
      * Store intended URL for redirect after login
+     *
+     * The URL is attacker-influenceable (AuthMiddleware feeds it the request
+     * URL), so it is sanitized to a same-origin relative path here — an
+     * absolute or protocol-relative URL must never survive the round trip,
+     * or the post-login redirect becomes an open redirect.
      */
     public function setIntendedUrl(string $url): void
     {
-        $this->set('_intended_url', $url);
+        $this->set('_intended_url', $this->sanitizeRelativeUrl($url));
+    }
+
+    /**
+     * Reduce a URL to a safe same-origin relative path (+ query)
+     */
+    private function sanitizeRelativeUrl(string $url): string
+    {
+        // Protocol-relative (//evil.com) — no salvageable path
+        if (str_starts_with($url, '//')) {
+            return '/';
+        }
+
+        // Absolute URL (scheme:...) — keep only path + query
+        if (preg_match('#^[a-z][a-z0-9+.\-]*:#i', $url)) {
+            $path = parse_url($url, PHP_URL_PATH);
+            $query = parse_url($url, PHP_URL_QUERY);
+            $url = (is_string($path) && $path !== '' ? $path : '/')
+                . (is_string($query) && $query !== '' ? "?{$query}" : '');
+        }
+
+        // Backslash tricks (/\evil.com) — some browsers treat \ as /
+        if (str_starts_with($url, '/\\') || str_starts_with($url, '\\')) {
+            return '/';
+        }
+
+        return str_starts_with($url, '/') ? $url : '/';
     }
 
     /**

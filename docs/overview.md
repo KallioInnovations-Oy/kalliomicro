@@ -100,9 +100,7 @@ Guards `PHP_SAPI === 'cli'`, defines `KALLIOMICRO_BASE_PATH`, locates the compos
 
 Registers exception/error/shutdown handlers. Rendering: CLI → colored STDERR (exit 1); JSON-wanting requests → JSON (debug adds exception/file/line/trace); web → full debug page in debug mode, generic error page otherwise. Paths listed via `setHiddenPaths()` are redacted in traces. Critical errors (`Error`, `PDOException`, `RuntimeException`) can notify Teams via `Communicator` when `notifyOnCritical` is enabled.
 
-Status-code mapping (`getHttpCode`): `HttpException` → its status code; `InvalidArgumentException` → 400; everything else → 500.
-
-> ⚠ **Known limitation (as of 2026-07-14):** the handler does *not* honor a generic exception's `code` property — `throw new RuntimeException('...', 403)` (as `Controller::requireCsrf()` does) renders as **500**, not 403. Throw `HttpException::forbidden()` when the status matters, or rely on `CsrfMiddleware` (which returns a proper 403 response).
+Status-code mapping (`getHttpCode`, public): `HttpException` → its status code; any exception whose `code` is an int in 400–599 → that status (`throw new RuntimeException('...', 403)` renders as 403); `InvalidArgumentException` → 400; everything else → 500. `HttpException` remains the preferred way to abort with a specific status.
 
 ---
 

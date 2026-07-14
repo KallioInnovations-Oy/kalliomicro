@@ -467,7 +467,13 @@ abstract class Controller
             return false;
         }
 
-        $token = $this->input('csrf_token') ?? $this->request->header('x-csrf-token');
+        // An empty csrf_token field (e.g. rendered before the session token was
+        // shared) must not shadow the X-CSRF-Token header the JS client sends.
+        $token = $this->input('csrf_token');
+        if ($token === null || $token === '') {
+            $token = $this->request->header('x-csrf-token');
+        }
+
         return $this->session->verifyCsrfToken($token);
     }
 

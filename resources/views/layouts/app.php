@@ -85,7 +85,11 @@
 
     <!-- Main content -->
     <main class="container py-4">
-        <?= $content ?>
+        <?php /* Section-based pages capture their body into the 'content' section;
+                 $content (the child's direct output) is only the fallback for
+                 templates that emit output without sections. Bare $content here
+                 would render section-based pages EMPTY. */ ?>
+        <?= $view->yield('content', $content ?? '') ?>
     </main>
 
     <!-- Footer -->
