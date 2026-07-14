@@ -2,7 +2,7 @@
 
 Official specification of the KallioMicro framework — a minimal, secure PHP 8.1+ MVC framework by Mesvac Oy, designed as a reusable base for downstream projects.
 
-Every document is **verified against the source in `src/`**; when a doc and the code disagree, one of them gets fixed — never silent drift. Known defects and limitations are documented in place with a ⚠ marker and an "as of" date. Descriptions are technical by intent: signatures, contracts, and behavior over narrative.
+Every document is **verified against the source in `src/`**; when a doc and the code disagree, one of them gets fixed — never silent drift. Two kinds of annotation are used deliberately: **scope notes** mark intentional baseline boundaries (the base ships mechanisms; deployments own policies), while **⚠ markers with an "as of" date** mark genuine defects or sharp edges awaiting a fix. Descriptions are technical by intent: signatures, contracts, and behavior over narrative.
 
 | Document | Covers |
 |---|---|

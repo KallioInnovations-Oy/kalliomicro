@@ -31,10 +31,10 @@ interface AuthProviderInterface { authenticate(array $credentials): AuthResult; 
 interface OAuthProviderInterface extends AuthProviderInterface { getAuthorizationUrl(): string; handleCallback(array $params): AuthResult; }
 ```
 
-⚠ Base-framework caveats (as of 2026-07-14):
+**Scope notes (by design)** — the base ships authentication *mechanisms*; the policies are the deployment's to own:
 
-- **No login throttling** — there is no attempt counter or lockout. Add rate limiting downstream (application table or infrastructure) before exposing a login form publicly.
-- **OAuth callback logs the provider user in directly.** If your deployment requires pre-provisioned accounts (SSO users must already exist locally), do NOT rely on the default flow — resolve the provider identity to a local user record in your auth controller and call `Session::login()` with the *local* user only. Derived deployments treat this as a hard rule.
+- **No login throttling** — there is no attempt counter or lockout. A deployment exposing a login form publicly adds its own rate limiting (application table or infrastructure).
+- **OAuth callback logs the provider user in directly.** Deployments that require pre-provisioned accounts (SSO users must already exist locally) implement that policy in their auth controller: resolve the provider identity to a local user record and call `Session::login()` with the *local* user only.
 
 ## Providers
 
@@ -78,11 +78,12 @@ Service-account bind → search (`user_filter`, default `(sAMAccountName={userna
 
 Reserved session keys: `_csrf_token`, `_last_regenerated`, `_authenticated`, `_user`, `_login_time`, `_flash`, `_impersonating`, `_original_user`, `_intended_url`, `_oauth_state`, `_oauth_code_verifier`.
 
-⚠ Caveats (as of 2026-07-14):
+**Scope notes (by design):**
 
-- **File sessions only.** There is no database session handler — multi-replica deployments (load-balanced containers with ephemeral disks) will see random logouts. Register a custom `SessionHandlerInterface` before scaling out.
-- **`impersonate()` performs no authorization check** — it swaps the session user for whatever array you pass. The *caller* must gate it (admin role check) before invoking.
-- **`setIntendedUrl()` stores the URL unsanitized** and `AuthMiddleware` feeds it `$request->url()`. Sanitize to a same-origin relative path before redirecting to `pullIntendedUrl()` if the URL can be attacker-influenced.
+- **Native PHP file sessions.** There is no database session handler in the base — a multi-replica deployment (load-balanced containers with ephemeral disks) registers its own `SessionHandlerInterface` before scaling out.
+- **`impersonate()` is a mechanism, not a policy** — it swaps the session user for whatever array you pass, with no authorization check. The *caller* gates it (admin role check or equivalent); the base cannot know which role model a deployment uses.
+
+⚠ Sharp edge (as of 2026-07-14): **`setIntendedUrl()` stores the URL unsanitized** and the shipped `AuthMiddleware` feeds it `$request->url()` automatically. Sanitize to a same-origin relative path before redirecting to `pullIntendedUrl()` if the URL can be attacker-influenced (open-redirect risk in the default wiring).
 
 ---
 
