@@ -2,18 +2,22 @@
 
 A modern, secure PHP 8+ MVC framework built with SOLID principles and minimal dependencies.
 
+## Documentation
+
+The full framework specification lives in [docs/](docs/README.md) — verified against the source, covering the container and lifecycle, routing/middleware, the query builder, validation, auth/sessions, the ApiResponse action system with its JavaScript client contract, views, the console, and conventions. This README is the quick-start; the docs are the reference.
+
 ## Features
 
 - **Security First**: CSRF protection, prepared statements, secure session handling
 - **SOLID Principles**: Clean separation of concerns, dependency injection
-- **Minimal Dependencies**: Only essential packages (Twig optional, dotenv, monolog)
+- **Minimal Dependencies**: one composer package (PHPMailer); native `.env` loader
 - **Unified Response System**: Declarative actions, no eval()
 - **Modern JavaScript Handler**: Single entry point for all AJAX interactions
 - **Multi-Auth Support**: Local, Entra ID, LDAP, Google
-- **Flexible Templating**: Native PHP or Twig integration
-- **Query Builder**: Fluent database interface with automatic escaping
+- **Native PHP Templating**: layouts, sections, escaping helpers
+- **Query Builder**: Fluent database interface with automatic parameter binding and identifier validation
 - **Unified Logging**: Database and file logging with PSR-3 support
-- **Notifications**: Email (Symfony Mailer) and webhook support (Teams, Slack)
+- **Notifications**: Email (PHPMailer) and webhook support (Teams, Slack)
 - **Error Handling**: Global exception handler with formatted output
 - **CLI Console**: Task runner with cron scheduling
 
