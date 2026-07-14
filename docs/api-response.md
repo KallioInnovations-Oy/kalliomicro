@@ -13,6 +13,8 @@ User action (data-action element / data-ajax form)
 
 The client is **standalone vanilla JS** — no HTMX, no jQuery dependency (jQuery/DataTables are optional integration hooks, see `refresh_table`).
 
+> **Historical note:** this client predates the 2026-03 decision to move server-driven UI to **HTMX + Tailwind** (the direction derived deployments follow, with an HTMX-based client implementing the same envelope). It remains the base's zero-build default and is fully functional — but treat the **action contract** (the envelope and action table below) as the durable specification; the `data-action` trigger system and Bootstrap styling are the legacy layer. A project starting fresh should choose its client stack first.
+
 ---
 
 ## The envelope

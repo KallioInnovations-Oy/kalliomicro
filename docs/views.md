@@ -84,7 +84,7 @@ $view->method('PUT')                  // _method spoofing hidden field (POST for
 The shipped layout provides everything the client contract needs:
 
 - `<meta name="csrf-token" content="…">` — token source for kalliomicro.js
-- **Bootstrap 5.3 via CDN** (CSS + JS bundle) — the only styling dependency; no Tailwind, no npm, no compiled assets
+- **Bootstrap 5.3 via CDN** (CSS + JS bundle) — the only styling dependency; no Tailwind, no npm, no compiled assets. *Historical note: this predates the 2026-03 HTMX + Tailwind direction that derived deployments follow — it stays as the base's zero-build default until a new downstream project decides its stack*
 - An inline `<style>` block: flash container (fixed top-right), `.is-loading`, and modal z-index stacking for levels 1–3
 - `#flash-messages` and `#modal-container`
 - A Bootstrap navbar gated on `$view->isAuth()`
