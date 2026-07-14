@@ -1,414 +1,888 @@
 /**
- * KallioMicro Framework - JavaScript Response Handler
+ * KallioMicro Framework - Unified JavaScript Handler
  *
- * Handles the unified response system with declarative actions.
- * No eval() - all actions are type-safe and predefined.
+ * A single, clean system for handling all server responses without eval().
+ * Uses declarative actions from ApiResponse to manipulate the DOM safely.
+ *
+ * Usage:
+ *   <button data-action="submit" data-url="/api/save" data-form="myForm">Save</button>
+ *   <button data-action="load" data-url="/api/data" data-target="#container">Load</button>
+ *   <button data-action="confirm" data-message="Are you sure?" data-url="/api/delete">Delete</button>
  */
 
-const KallioMicro = (function () {
+const KallioMicro = (function() {
     'use strict';
 
-    const CONFIG = {
-        csrfToken: document.querySelector('meta[name="csrf-token"]')?.content || '',
+    // Configuration
+    const config = {
+        csrfToken: null,
+        csrfHeader: 'X-CSRF-Token',
+        csrfField: 'csrf_token',
         flashDuration: 5000,
+        flashContainer: '#flash-messages',
+        modalContainer: '#modal-container',
         loadingClass: 'is-loading',
+        debug: false,
+    };
+
+    // State
+    const state = {
+        activeModals: [],
+        pendingRequests: new Map(),
     };
 
     /**
-     * Action handlers - each action type has a dedicated handler
+     * Initialize the framework
      */
-    const actionHandlers = {
-        flash: (action) => {
-            showFlash(action.message, action.level);
-        },
+    function init(options = {}) {
+        Object.assign(config, options);
 
-        replace: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.innerHTML = action.content;
-        },
+        // Get CSRF token from meta tag or hidden field
+        const csrfMeta = document.querySelector('meta[name="csrf-token"]');
+        const csrfInput = document.querySelector('input[name="csrf_token"]');
+        config.csrfToken = csrfMeta?.content || csrfInput?.value || '';
 
-        append: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.insertAdjacentHTML('beforeend', action.content);
-        },
+        // Attach event delegation
+        document.addEventListener('click', handleClick);
+        document.addEventListener('submit', handleSubmit);
+        document.addEventListener('change', handleChange);
 
-        prepend: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.insertAdjacentHTML('afterbegin', action.content);
-        },
+        // Setup keyboard handlers for modals
+        document.addEventListener('keydown', handleKeydown);
 
-        remove: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.remove();
-        },
+        if (config.debug) {
+            console.log('KallioMicro initialized', config);
+        }
+    }
 
-        update_field: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.value = action.value;
-        },
+    /**
+     * Handle click events via delegation
+     */
+    function handleClick(e) {
+        const element = e.target.closest('[data-action]');
+        if (!element) return;
 
-        redirect: (action) => {
-            window.location.href = action.url;
-        },
+        const action = element.dataset.action;
 
-        open_tab: (action) => {
-            window.open(action.url, '_blank');
-        },
+        // Prevent default for buttons/links
+        if (element.tagName === 'BUTTON' || element.tagName === 'A') {
+            e.preventDefault();
+        }
 
-        modal: (action) => {
-            openModal(action.content, action.size || 'md', action.id);
-        },
-
-        nested_modal: (action) => {
-            openNestedModal(action.content, action.size || 'md', action.level || 2);
-        },
-
-        close_modal: (action) => {
-            closeModal(action.level);
-        },
-
-        close_all_modals: () => {
-            closeAllModals();
-        },
-
-        refresh_table: (action) => {
-            const table = document.querySelector(action.target);
-            if (table && typeof $.fn.DataTable !== 'undefined') {
-                $(action.target).DataTable().ajax.reload(null, false);
-            }
-        },
-
-        clear_form: (action) => {
-            const form = document.querySelector(action.target);
-            if (form) form.reset();
-        },
-
-        reset_form: (action) => {
-            const form = document.querySelector(action.target);
-            if (form) form.reset();
-        },
-
-        toggle_disabled: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.disabled = action.disabled;
-        },
-
-        toggle_visibility: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.style.display = action.visible ? '' : 'none';
-        },
-
-        toggle_class: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) {
-                if (action.add) {
-                    el.classList.add(action.class);
-                } else {
-                    el.classList.remove(action.class);
+        // Handle different actions
+        switch (action) {
+            case 'submit':
+                handleActionSubmit(element);
+                break;
+            case 'load':
+                handleActionLoad(element);
+                break;
+            case 'confirm':
+                handleActionConfirm(element);
+                break;
+            case 'modal':
+                handleActionModal(element);
+                break;
+            case 'close-modal':
+                closeTopModal();
+                break;
+            case 'toggle':
+                handleActionToggle(element);
+                break;
+            case 'copy':
+                handleActionCopy(element);
+                break;
+            default:
+                if (config.debug) {
+                    console.log('Unknown action:', action);
                 }
-            }
-        },
-
-        scroll_to: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.scrollIntoView({ behavior: 'smooth' });
-        },
-
-        focus: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) el.focus();
-        },
-
-        trigger_event: (action) => {
-            const el = document.querySelector(action.target);
-            if (el) {
-                const event = new CustomEvent(action.event, { detail: action.detail });
-                el.dispatchEvent(event);
-            }
-        },
-
-        download: (action) => {
-            const link = document.createElement('a');
-            link.href = action.url;
-            if (action.filename) link.download = action.filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        },
-
-        confirm: (action) => {
-            if (confirm(action.message)) {
-                processActions(action.on_confirm);
-            }
-        },
-    };
+        }
+    }
 
     /**
-     * Process API response actions
+     * Handle form submissions
      */
-    function processActions(actions) {
-        if (!Array.isArray(actions)) return;
+    function handleSubmit(e) {
+        const form = e.target;
+        if (!form.dataset.ajax) return;
 
-        actions.forEach((action) => {
-            const handler = actionHandlers[action.type];
-            if (handler) {
-                handler(action);
-            } else {
-                console.warn('Unknown action type:', action.type);
+        e.preventDefault();
+        submitForm(form);
+    }
+
+    /**
+     * Handle change events
+     */
+    function handleChange(e) {
+        const element = e.target;
+        if (!element.dataset.autoSubmit) return;
+
+        const form = element.closest('form');
+        if (form) {
+            submitForm(form);
+        }
+    }
+
+    /**
+     * Handle keyboard events
+     */
+    function handleKeydown(e) {
+        if (e.key === 'Escape' && state.activeModals.length > 0) {
+            closeTopModal();
+        }
+    }
+
+    // Action handlers
+
+    /**
+     * Submit a form via AJAX
+     */
+    function handleActionSubmit(element) {
+        const formId = element.dataset.form;
+        const form = formId ? document.getElementById(formId) : element.closest('form');
+
+        if (!form) {
+            console.error('Form not found for submit action');
+            return;
+        }
+
+        const url = element.dataset.url || form.action;
+        submitForm(form, url, element);
+    }
+
+    /**
+     * Load content into a target
+     */
+    function handleActionLoad(element) {
+        const url = element.dataset.url;
+        const target = element.dataset.target;
+        const method = element.dataset.method || 'GET';
+
+        if (!url || !target) {
+            console.error('Missing url or target for load action');
+            return;
+        }
+
+        setLoading(element, true);
+
+        request(url, { method })
+            .then(response => processResponse(response, element))
+            .finally(() => setLoading(element, false));
+    }
+
+    /**
+     * Show confirmation before proceeding
+     */
+    function handleActionConfirm(element) {
+        const message = element.dataset.message || 'Are you sure?';
+        const confirmText = element.dataset.confirmText || 'Yes';
+        const cancelText = element.dataset.cancelText || 'No';
+
+        showConfirmModal(message, confirmText, cancelText, () => {
+            // On confirm, proceed with the action
+            const url = element.dataset.url;
+            if (url) {
+                const method = element.dataset.method || 'POST';
+                const data = collectDataAttributes(element);
+
+                setLoading(element, true);
+
+                request(url, { method, data })
+                    .then(response => processResponse(response, element))
+                    .finally(() => setLoading(element, false));
             }
         });
     }
 
     /**
-     * Process full API response
+     * Open a modal
      */
-    function processResponse(response) {
-        // Show message as flash if present and no explicit flash action
-        if (response.message && !response.actions?.some(a => a.type === 'flash')) {
-            showFlash(response.message, response.code);
-        }
+    function handleActionModal(element) {
+        const url = element.dataset.url;
+        const size = element.dataset.size || 'md';
 
-        // Process all actions
-        if (response.actions) {
-            processActions(response.actions);
+        if (url) {
+            setLoading(element, true);
+
+            request(url)
+                .then(response => {
+                    if (response.success && response.data?.content) {
+                        showModal(response.data.content, size);
+                    } else {
+                        processResponse(response, element);
+                    }
+                })
+                .finally(() => setLoading(element, false));
         }
     }
 
     /**
-     * Show flash message
+     * Toggle visibility/class
      */
-    function showFlash(message, level = 1) {
-        const container = document.getElementById('flash-messages');
-        if (!container) return;
+    function handleActionToggle(element) {
+        const target = document.querySelector(element.dataset.target);
+        if (!target) return;
 
-        const alertClass = {
-            0: 'alert-secondary',  // bypass
-            1: 'alert-success',    // success
-            2: 'alert-info',       // info
-            3: 'alert-warning',    // warning
-            4: 'alert-danger',     // error
-        }[level] || 'alert-info';
-
-        const alert = document.createElement('div');
-        alert.className = `alert ${alertClass} alert-dismissible fade show`;
-        alert.innerHTML = `
-            ${escapeHtml(message)}
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        `;
-
-        container.appendChild(alert);
-
-        // Auto-dismiss after duration
-        setTimeout(() => {
-            alert.classList.remove('show');
-            setTimeout(() => alert.remove(), 150);
-        }, CONFIG.flashDuration);
+        const toggleClass = element.dataset.toggleClass || 'd-none';
+        target.classList.toggle(toggleClass);
     }
 
     /**
-     * Modal management
+     * Copy text to clipboard
      */
-    let modalStack = [];
+    function handleActionCopy(element) {
+        const text = element.dataset.copyText || element.textContent;
 
-    function openModal(content, size = 'md', id = null) {
-        const modalId = id || 'km-modal-' + Date.now();
-        const level = modalStack.length + 1;
-
-        const modalHtml = `
-            <div class="modal km-modal fade" id="${modalId}" tabindex="-1" data-level="${level}">
-                <div class="modal-dialog modal-${size}">
-                    <div class="modal-content">
-                        ${content}
-                    </div>
-                </div>
-            </div>
-        `;
-
-        const container = document.getElementById('modal-container');
-        container.insertAdjacentHTML('beforeend', modalHtml);
-
-        const modalEl = document.getElementById(modalId);
-        const modal = new bootstrap.Modal(modalEl);
-
-        modalEl.addEventListener('hidden.bs.modal', () => {
-            modalStack = modalStack.filter(m => m.id !== modalId);
-            modalEl.remove();
+        navigator.clipboard.writeText(text).then(() => {
+            flash('Copied to clipboard', 'success');
+        }).catch(() => {
+            flash('Failed to copy', 'error');
         });
-
-        modalStack.push({ id: modalId, modal, level });
-        modal.show();
     }
 
-    function openNestedModal(content, size, level) {
-        openModal(content, size, 'km-modal-nested-' + level);
-    }
+    // Core functions
 
-    function closeModal(level = null) {
-        if (modalStack.length === 0) return;
+    /**
+     * Submit a form
+     */
+    function submitForm(form, url = null, trigger = null) {
+        url = url || form.action;
+        const method = form.dataset.method || form.method || 'POST';
 
-        let modalToClose;
-        if (level !== null) {
-            modalToClose = modalStack.find(m => m.level === level);
-        } else {
-            modalToClose = modalStack[modalStack.length - 1];
+        // Validate required fields
+        if (!validateForm(form)) {
+            return;
         }
 
-        if (modalToClose) {
-            modalToClose.modal.hide();
-        }
-    }
+        // Collect form data
+        const formData = new FormData(form);
 
-    function closeAllModals() {
-        [...modalStack].reverse().forEach(m => m.modal.hide());
+        // Add CSRF token if not present
+        if (!formData.has(config.csrfField) && config.csrfToken) {
+            formData.append(config.csrfField, config.csrfToken);
+        }
+
+        setLoading(trigger || form, true);
+
+        request(url, { method, body: formData })
+            .then(response => processResponse(response, trigger || form))
+            .finally(() => setLoading(trigger || form, false));
     }
 
     /**
-     * AJAX request helper
+     * Make an AJAX request
      */
     async function request(url, options = {}) {
         const defaults = {
             method: 'GET',
             headers: {
-                'Content-Type': 'application/json',
                 'Accept': 'application/json',
                 'X-Requested-With': 'XMLHttpRequest',
-                'X-CSRF-Token': CONFIG.csrfToken,
             },
         };
 
-        const config = { ...defaults, ...options };
-        config.headers = { ...defaults.headers, ...options.headers };
+        // Add CSRF header for state-changing requests
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(options.method?.toUpperCase())) {
+            defaults.headers[config.csrfHeader] = config.csrfToken;
+        }
+
+        const fetchOptions = { ...defaults, ...options };
+
+        // Handle data object (convert to FormData or JSON)
+        if (options.data && !(options.body instanceof FormData)) {
+            if (fetchOptions.headers['Content-Type'] === 'application/json') {
+                fetchOptions.body = JSON.stringify(options.data);
+            } else {
+                const formData = new FormData();
+                for (const [key, value] of Object.entries(options.data)) {
+                    formData.append(key, value);
+                }
+                fetchOptions.body = formData;
+            }
+        }
 
         try {
-            const response = await fetch(url, config);
-            const data = await response.json();
+            const response = await fetch(url, fetchOptions);
+            const contentType = response.headers.get('content-type') || '';
 
-            processResponse(data);
+            if (contentType.includes('application/json')) {
+                return await response.json();
+            }
 
-            return data;
+            // Non-JSON response
+            const text = await response.text();
+            return {
+                success: response.ok,
+                code: response.ok ? 1 : 4,
+                message: '',
+                data: { content: text },
+            };
         } catch (error) {
-            showFlash('Request failed: ' + error.message, 4);
-            throw error;
+            console.error('Request failed:', error);
+            return {
+                success: false,
+                code: 4,
+                message: 'Network error. Please try again.',
+            };
         }
     }
 
     /**
-     * Submit form via AJAX
+     * Process API response and execute actions
      */
-    async function submitForm(form, options = {}) {
-        const formData = new FormData(form);
-        const url = options.url || form.action;
-        const method = options.method || form.method || 'POST';
+    function processResponse(response, trigger = null) {
+        if (config.debug) {
+            console.log('Response:', response);
+        }
 
-        // Add loading state
-        form.classList.add(CONFIG.loadingClass);
-        const submitBtn = form.querySelector('[type="submit"]');
-        if (submitBtn) submitBtn.disabled = true;
+        // Show message if present
+        if (response.message) {
+            flash(response.message, response.success ? 'success' : 'error');
+        }
 
-        try {
-            const response = await request(url, {
-                method: method.toUpperCase(),
-                body: formData,
-                headers: {
-                    'X-CSRF-Token': CONFIG.csrfToken,
-                },
+        // Execute actions
+        if (response.actions && Array.isArray(response.actions)) {
+            for (const action of response.actions) {
+                executeAction(action, trigger);
+            }
+        }
+
+        // Trigger custom event
+        document.dispatchEvent(new CustomEvent('km:response', {
+            detail: { response, trigger }
+        }));
+
+        return response;
+    }
+
+    /**
+     * Execute a single action from the response
+     */
+    function executeAction(action, trigger = null) {
+        switch (action.type) {
+            case 'flash':
+                flash(action.message, getLevelClass(action.level));
+                break;
+
+            case 'replace':
+                replaceContent(action.target, action.content);
+                break;
+
+            case 'append':
+                appendContent(action.target, action.content);
+                break;
+
+            case 'prepend':
+                prependContent(action.target, action.content);
+                break;
+
+            case 'remove':
+                removeElement(action.target);
+                break;
+
+            case 'update_field':
+                updateField(action.target, action.value);
+                break;
+
+            case 'redirect':
+                window.location.href = action.url;
+                break;
+
+            case 'open_tab':
+                window.open(action.url, '_blank');
+                break;
+
+            case 'modal':
+                showModal(action.content, action.size, action.id);
+                break;
+
+            case 'nested_modal':
+                showModal(action.content, action.size, null, action.level);
+                break;
+
+            case 'close_modal':
+                if (action.level) {
+                    closeModalByLevel(action.level);
+                } else {
+                    closeTopModal();
+                }
+                break;
+
+            case 'close_all_modals':
+                closeAllModals();
+                break;
+
+            case 'refresh_table':
+                refreshDataTable(action.target, action.data);
+                break;
+
+            case 'add_table_rows':
+                addTableRows(action.target, action.rows);
+                break;
+
+            case 'clear_form':
+                clearForm(action.target);
+                break;
+
+            case 'reset_form':
+                resetForm(action.target);
+                break;
+
+            case 'toggle_disabled':
+                toggleDisabled(action.target, action.disabled);
+                break;
+
+            case 'toggle_visibility':
+                toggleVisibility(action.target, action.visible);
+                break;
+
+            case 'toggle_class':
+                toggleClass(action.target, action.class, action.add);
+                break;
+
+            case 'scroll_to':
+                scrollTo(action.target);
+                break;
+
+            case 'focus':
+                focusElement(action.target);
+                break;
+
+            case 'trigger_event':
+                triggerEvent(action.target, action.event, action.detail);
+                break;
+
+            case 'download':
+                downloadFile(action.url, action.filename);
+                break;
+
+            case 'confirm':
+                showConfirmModal(action.message, 'Yes', 'No', () => {
+                    for (const confirmAction of action.on_confirm) {
+                        executeAction(confirmAction, trigger);
+                    }
+                });
+                break;
+
+            default:
+                if (config.debug) {
+                    console.log('Unknown action type:', action.type);
+                }
+        }
+    }
+
+    // DOM manipulation functions
+
+    function replaceContent(selector, content) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.innerHTML = content;
+            initializeNewContent(element);
+        }
+    }
+
+    function appendContent(selector, content) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.insertAdjacentHTML('beforeend', content);
+            initializeNewContent(element.lastElementChild);
+        }
+    }
+
+    function prependContent(selector, content) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.insertAdjacentHTML('afterbegin', content);
+            initializeNewContent(element.firstElementChild);
+        }
+    }
+
+    function removeElement(selector) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.remove();
+        }
+    }
+
+    function updateField(selector, value) {
+        const element = document.querySelector(selector);
+        if (element) {
+            if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA' || element.tagName === 'SELECT') {
+                element.value = value;
+            } else {
+                element.textContent = value;
+            }
+        }
+    }
+
+    function toggleDisabled(selector, disabled) {
+        const elements = document.querySelectorAll(selector);
+        elements.forEach(el => el.disabled = disabled);
+    }
+
+    function toggleVisibility(selector, visible) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.classList.toggle('d-none', !visible);
+        }
+    }
+
+    function toggleClass(selector, className, add) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.classList.toggle(className, add);
+        }
+    }
+
+    function scrollTo(selector) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+
+    function focusElement(selector) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.focus();
+        }
+    }
+
+    function triggerEvent(selector, eventName, detail = {}) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.dispatchEvent(new CustomEvent(eventName, { detail, bubbles: true }));
+        }
+    }
+
+    function clearForm(selector) {
+        const form = document.querySelector(selector);
+        if (form) {
+            form.querySelectorAll('input, textarea, select').forEach(el => {
+                if (el.type === 'checkbox' || el.type === 'radio') {
+                    el.checked = false;
+                } else if (el.tagName === 'SELECT') {
+                    el.selectedIndex = 0;
+                } else if (!['hidden', 'submit', 'button'].includes(el.type)) {
+                    el.value = '';
+                }
             });
-
-            return response;
-        } finally {
-            form.classList.remove(CONFIG.loadingClass);
-            if (submitBtn) submitBtn.disabled = false;
         }
     }
 
-    /**
-     * Escape HTML for safe output
-     */
+    function resetForm(selector) {
+        const form = document.querySelector(selector);
+        if (form) {
+            form.reset();
+        }
+    }
+
+    function downloadFile(url, filename) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename || '';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
+
+    // DataTable functions
+
+    function refreshDataTable(selector, data) {
+        const table = document.querySelector(selector);
+        if (!table) return;
+
+        // If using DataTables library
+        if (window.jQuery && jQuery.fn.DataTable && jQuery(table).DataTable) {
+            const dt = jQuery(table).DataTable();
+            if (data) {
+                dt.clear();
+                dt.rows.add(data);
+            }
+            dt.draw();
+        }
+    }
+
+    function addTableRows(selector, rowsHtml) {
+        const tbody = document.querySelector(`${selector} tbody`);
+        if (tbody) {
+            tbody.insertAdjacentHTML('beforeend', rowsHtml);
+            initializeNewContent(tbody);
+
+            // Refresh DataTable if using
+            if (window.jQuery && jQuery.fn.DataTable) {
+                const table = tbody.closest('table');
+                if (jQuery(table).DataTable) {
+                    jQuery(table).DataTable().draw();
+                }
+            }
+        }
+    }
+
+    // Modal system
+
+    function showModal(content, size = 'md', id = null, level = null) {
+        const modalLevel = level || state.activeModals.length + 1;
+        const modalId = id || `km-modal-${modalLevel}`;
+
+        // Create modal structure
+        const modalHtml = `
+            <div class="modal fade km-modal" id="${modalId}" data-level="${modalLevel}" tabindex="-1" role="dialog">
+                <div class="modal-dialog modal-${size}" role="document">
+                    <div class="modal-content">
+                        ${content}
+                    </div>
+                </div>
+            </div>
+            <div class="modal-backdrop fade show km-backdrop" data-level="${modalLevel}"></div>
+        `;
+
+        // Get or create modal container
+        let container = document.querySelector(config.modalContainer);
+        if (!container) {
+            container = document.createElement('div');
+            container.id = config.modalContainer.replace('#', '');
+            document.body.appendChild(container);
+        }
+
+        container.insertAdjacentHTML('beforeend', modalHtml);
+
+        const modal = document.getElementById(modalId);
+
+        // Show modal
+        requestAnimationFrame(() => {
+            modal.classList.add('show');
+            modal.style.display = 'block';
+            document.body.classList.add('modal-open');
+        });
+
+        state.activeModals.push({ id: modalId, level: modalLevel });
+
+        // Focus first input
+        const firstInput = modal.querySelector('input, select, textarea');
+        if (firstInput) {
+            setTimeout(() => firstInput.focus(), 100);
+        }
+
+        initializeNewContent(modal);
+    }
+
+    function closeTopModal() {
+        if (state.activeModals.length === 0) return;
+
+        const modalInfo = state.activeModals.pop();
+        closeModalById(modalInfo.id);
+    }
+
+    function closeModalById(modalId) {
+        const modal = document.getElementById(modalId);
+        if (!modal) return;
+
+        const level = modal.dataset.level;
+        const backdrop = document.querySelector(`.km-backdrop[data-level="${level}"]`);
+
+        modal.classList.remove('show');
+        if (backdrop) backdrop.remove();
+
+        setTimeout(() => {
+            modal.remove();
+            if (state.activeModals.length === 0) {
+                document.body.classList.remove('modal-open');
+            }
+        }, 150);
+    }
+
+    function closeModalByLevel(level) {
+        const modalInfo = state.activeModals.find(m => m.level === level);
+        if (modalInfo) {
+            state.activeModals = state.activeModals.filter(m => m.level !== level);
+            closeModalById(modalInfo.id);
+        }
+    }
+
+    function closeAllModals() {
+        while (state.activeModals.length > 0) {
+            closeTopModal();
+        }
+    }
+
+    function showConfirmModal(message, confirmText, cancelText, onConfirm) {
+        const content = `
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm</h5>
+                <button type="button" class="close" data-action="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>${escapeHtml(message)}</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-action="close-modal">${escapeHtml(cancelText)}</button>
+                <button type="button" class="btn btn-primary" id="km-confirm-btn">${escapeHtml(confirmText)}</button>
+            </div>
+        `;
+
+        showModal(content, 'sm');
+
+        // Attach confirm handler
+        const confirmBtn = document.getElementById('km-confirm-btn');
+        if (confirmBtn) {
+            confirmBtn.addEventListener('click', () => {
+                closeTopModal();
+                onConfirm();
+            }, { once: true });
+        }
+    }
+
+    // Flash messages
+
+    function flash(message, type = 'info') {
+        let container = document.querySelector(config.flashContainer);
+
+        if (!container) {
+            container = document.createElement('div');
+            container.id = config.flashContainer.replace('#', '');
+            container.className = 'flash-container';
+            document.body.insertBefore(container, document.body.firstChild);
+        }
+
+        const alertClass = {
+            success: 'alert-success',
+            error: 'alert-danger',
+            warning: 'alert-warning',
+            info: 'alert-info',
+        }[type] || 'alert-info';
+
+        const alertHtml = `
+            <div class="alert ${alertClass} alert-dismissible fade show" role="alert">
+                ${escapeHtml(message)}
+                <button type="button" class="close" data-dismiss="alert">&times;</button>
+            </div>
+        `;
+
+        container.insertAdjacentHTML('beforeend', alertHtml);
+        const alert = container.lastElementChild;
+
+        // Auto dismiss
+        if (config.flashDuration > 0) {
+            setTimeout(() => {
+                alert.classList.remove('show');
+                setTimeout(() => alert.remove(), 150);
+            }, config.flashDuration);
+        }
+
+        // Manual dismiss
+        alert.querySelector('.close')?.addEventListener('click', () => {
+            alert.classList.remove('show');
+            setTimeout(() => alert.remove(), 150);
+        });
+    }
+
+    function getLevelClass(level) {
+        return {
+            0: 'info',    // bypass
+            1: 'success', // success
+            2: 'info',    // info
+            3: 'warning', // warning
+            4: 'error',   // error
+        }[level] || 'info';
+    }
+
+    // Utility functions
+
+    function validateForm(form) {
+        const requiredFields = form.querySelectorAll('[required], .needsvalue');
+        let valid = true;
+
+        requiredFields.forEach(field => {
+            if (!field.value.trim()) {
+                field.classList.add('is-invalid');
+                valid = false;
+            } else {
+                field.classList.remove('is-invalid');
+            }
+        });
+
+        if (!valid) {
+            flash('Please fill in all required fields', 'warning');
+            const firstInvalid = form.querySelector('.is-invalid');
+            if (firstInvalid) {
+                firstInvalid.focus();
+            }
+        }
+
+        return valid;
+    }
+
+    function setLoading(element, loading) {
+        if (!element) return;
+
+        if (loading) {
+            element.classList.add(config.loadingClass);
+            element.disabled = true;
+        } else {
+            element.classList.remove(config.loadingClass);
+            element.disabled = false;
+        }
+    }
+
+    function collectDataAttributes(element) {
+        const data = {};
+        for (const [key, value] of Object.entries(element.dataset)) {
+            // Skip action-related attributes
+            if (!['action', 'url', 'method', 'target', 'form'].includes(key)) {
+                data[key] = value;
+            }
+        }
+        return data;
+    }
+
     function escapeHtml(text) {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
     }
 
-    /**
-     * Initialize event delegation for data-action attributes
-     */
-    function initEventDelegation() {
-        document.addEventListener('click', async (e) => {
-            const trigger = e.target.closest('[data-action]');
-            if (!trigger) return;
+    function initializeNewContent(element) {
+        if (!element) return;
 
-            const action = trigger.dataset.action;
+        // Trigger event for other scripts to initialize new content
+        document.dispatchEvent(new CustomEvent('km:content-loaded', {
+            detail: { element }
+        }));
 
-            switch (action) {
-                case 'load':
-                    e.preventDefault();
-                    await request(trigger.dataset.url, {
-                        method: trigger.dataset.method || 'GET',
-                    });
-                    break;
+        // Initialize datepickers if present
+        if (window.jQuery && jQuery.fn.datepicker) {
+            jQuery(element).find('.setdatepicker').datepicker();
+        }
 
-                case 'submit':
-                    e.preventDefault();
-                    const form = document.getElementById(trigger.dataset.form) ||
-                                 trigger.closest('form');
-                    if (form) await submitForm(form);
-                    break;
-
-                case 'confirm':
-                    e.preventDefault();
-                    if (confirm(trigger.dataset.message || 'Are you sure?')) {
-                        await request(trigger.dataset.url, {
-                            method: trigger.dataset.method || 'POST',
-                        });
-                    }
-                    break;
-
-                case 'modal':
-                    e.preventDefault();
-                    const response = await fetch(trigger.dataset.url, {
-                        headers: {
-                            'Accept': 'text/html',
-                            'X-Requested-With': 'XMLHttpRequest',
-                        },
-                    });
-                    const html = await response.text();
-                    openModal(html, trigger.dataset.size || 'md');
-                    break;
-
-                case 'close-modal':
-                    e.preventDefault();
-                    closeModal();
-                    break;
-            }
-        });
-
-        // Form submit handling
-        document.addEventListener('submit', async (e) => {
-            const form = e.target;
-            if (form.dataset.ajax !== 'true') return;
-
-            e.preventDefault();
-            await submitForm(form);
-        });
+        // Initialize DataTables if present
+        if (window.jQuery && jQuery.fn.DataTable) {
+            jQuery(element).find('table.datatable').DataTable();
+        }
     }
-
-    // Initialize on DOM ready
-    document.addEventListener('DOMContentLoaded', initEventDelegation);
 
     // Public API
     return {
+        init,
         request,
-        submitForm,
-        processResponse,
-        processActions,
-        showFlash,
-        openModal,
-        closeModal,
+        flash,
+        showModal,
+        closeTopModal,
         closeAllModals,
-        config: CONFIG,
+        processResponse,
+        executeAction,
+        config,
     };
 })();
 
-// Make available globally
-window.KM = KallioMicro;
+// Auto-initialize when DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => KallioMicro.init());
+} else {
+    KallioMicro.init();
+}
+
+// Export for module systems
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = KallioMicro;
+}

@@ -43,7 +43,7 @@ class ListCommand extends Command
             }
 
             foreach ($commands as $name => $command) {
-                $padding = str_repeat(' ', 25 - strlen($name));
+                $padding = str_repeat(' ', max(1, 25 - strlen($name)));
                 $this->line("  {$name}{$padding}{$command->getDescription()}");
             }
 

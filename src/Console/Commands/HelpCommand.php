@@ -55,7 +55,7 @@ class HelpCommand extends Command
         if (!empty($arguments)) {
             $this->info('Arguments:');
             foreach ($arguments as $name => $description) {
-                $padding = str_repeat(' ', 20 - strlen($name));
+                $padding = str_repeat(' ', max(1, 20 - strlen($name)));
                 $this->line("  {$name}{$padding}{$description}");
             }
             $this->line('');
@@ -65,7 +65,7 @@ class HelpCommand extends Command
         if (!empty($options)) {
             $this->info('Options:');
             foreach ($options as $name => $description) {
-                $padding = str_repeat(' ', 18 - strlen($name));
+                $padding = str_repeat(' ', max(1, 18 - strlen($name)));
                 $this->line("  --{$name}{$padding}{$description}");
             }
             $this->line('');

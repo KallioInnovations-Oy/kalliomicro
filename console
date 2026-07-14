@@ -57,18 +57,14 @@ if (file_exists(__DIR__ . '/src/Support/helpers.php')) {
 }
 
 use KallioMicro\Core\Application;
-use KallioMicro\Core\Container;
 use KallioMicro\Console\Console;
 use KallioMicro\Support\Logger;
 use KallioMicro\Support\ExceptionHandler;
 
 // Bootstrap application
 try {
-    // Create container
-    $container = new Container();
-
-    // Create application
-    $app = new Application($container, __DIR__);
+    // Create application (Application is the container)
+    $app = new Application(__DIR__);
 
     // Create logger (file-only for CLI)
     $logger = new Logger(
@@ -79,11 +75,11 @@ try {
     );
     $logger->setFileOnly(true);
 
-    // Register exception handler
+    // Register exception handler (config is available once the app exists)
     $exceptionHandler = new ExceptionHandler(
         $logger,
         null,
-        env('APP_DEBUG', false)
+        (bool) config('app.debug', false)
     );
     $exceptionHandler->register();
 
@@ -107,6 +103,7 @@ try {
 } catch (\Throwable $e) {
     fwrite(STDERR, "\033[31mError: " . $e->getMessage() . "\033[0m\n");
 
+    // env() (not config()) on purpose: bootstrap may have failed before config was loadable
     if (env('APP_DEBUG', false)) {
         fwrite(STDERR, "\n" . $e->getTraceAsString() . "\n");
     }

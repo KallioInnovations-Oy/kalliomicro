@@ -19,18 +19,17 @@ namespace KallioMicro\Support;
  * - Empty lines are ignored
  * - Multiline values with quotes
  *
- * Special values (case-insensitive):
- * - true, (true) -> bool true
- * - false, (false) -> bool false
- * - null, (null) -> null
- * - empty, (empty) -> ''
+ * Values are always stored as strings ($_ENV/putenv are string-only).
+ * Type coercion of the special values true/false/null/empty (with or
+ * without parentheses, case-insensitive) is performed by the env()
+ * helper in src/Support/helpers.php, not by this loader.
  */
 class DotEnv
 {
     private string $path;
     private bool $overwrite;
 
-    /** @var array<string, string|bool|null> Parsed variables */
+    /** @var array<string, string> Parsed variables */
     private array $variables = [];
 
     public function __construct(string $path, bool $overwrite = false)

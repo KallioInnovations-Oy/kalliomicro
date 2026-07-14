@@ -149,6 +149,14 @@ abstract class Controller
         $data['user'] = $this->session?->getUser();
         $data['flash'] = $this->session?->getFlash();
 
+        // Also share into the engine: $view->csrf(), isAuth() and hasRole()
+        // read the shared bag, not per-render data — without this they see
+        // an empty token / no user in every template.
+        if ($this->view !== null) {
+            $this->view->share('csrf_token', $data['csrf_token']);
+            $this->view->share('user', $data['user']);
+        }
+
         return $data;
     }
 
@@ -248,10 +256,11 @@ abstract class Controller
                 // Parse rule:param1,param2 format
                 if (str_contains($rule, ':')) {
                     [$rule, $paramString] = explode(':', $rule, 2);
-                    $params = explode(',', $paramString);
+                    // Regex patterns may legitimately contain commas — take the remainder whole
+                    $params = $rule === 'regex' ? [$paramString] : explode(',', $paramString);
                 }
 
-                $error = $this->validateRule($field, $value, $rule, $params, $data);
+                $error = $this->validateRule($field, $value, $rule, $params, $data, $fieldRules);
 
                 if ($error !== null) {
                     $customKey = "{$field}.{$rule}";
@@ -271,7 +280,7 @@ abstract class Controller
     /**
      * Validate a single rule
      */
-    private function validateRule(string $field, mixed $value, string $rule, array $params, array $data): ?string
+    private function validateRule(string $field, mixed $value, string $rule, array $params, array $data, array $allRules = []): ?string
     {
         return match ($rule) {
             'required' => $this->validateRequired($field, $value),
@@ -279,16 +288,37 @@ abstract class Controller
             'numeric' => $this->validateNumeric($field, $value),
             'integer' => $this->validateInteger($field, $value),
             'string' => $this->validateString($field, $value),
-            'min' => $this->validateMin($field, $value, $params[0] ?? 0),
-            'max' => $this->validateMax($field, $value, $params[0] ?? PHP_INT_MAX),
-            'between' => $this->validateBetween($field, $value, $params[0] ?? 0, $params[1] ?? PHP_INT_MAX),
+            'min' => $this->validateMin($field, $value, $params[0] ?? 0, $allRules),
+            'max' => $this->validateMax($field, $value, $params[0] ?? PHP_INT_MAX, $allRules),
+            'between' => $this->validateBetween($field, $value, $params[0] ?? 0, $params[1] ?? PHP_INT_MAX, $allRules),
             'in' => $this->validateIn($field, $value, $params),
             'confirmed' => $this->validateConfirmed($field, $value, $data),
             'url' => $this->validateUrl($field, $value),
             'date' => $this->validateDate($field, $value),
             'regex' => $this->validateRegex($field, $value, $params[0] ?? ''),
-            default => null, // Unknown rules pass
+            // A typo'd rule name silently passing is worse than an exception in dev
+            default => throw new \InvalidArgumentException("Unknown validation rule: {$rule}"),
         };
+    }
+
+    /**
+     * Whether min/max/between should compare numerically instead of by string length.
+     *
+     * Form input always arrives as strings, so a bare is_numeric() check would
+     * compare '123412342134' as a number against max:255 when the author meant
+     * "max 255 characters". Numeric comparison applies only when the field also
+     * declares numeric/integer, or the value is a real PHP int/float.
+     */
+    private function isNumericContext(array $allRules, mixed $value): bool
+    {
+        foreach ($allRules as $declaredRule) {
+            $name = str_contains($declaredRule, ':') ? strstr($declaredRule, ':', true) : $declaredRule;
+            if ($name === 'numeric' || $name === 'integer') {
+                return true;
+            }
+        }
+
+        return is_int($value) || is_float($value);
     }
 
     private function validateRequired(string $field, mixed $value): ?string
@@ -331,7 +361,7 @@ abstract class Controller
         return null;
     }
 
-    private function validateMin(string $field, mixed $value, mixed $min): ?string
+    private function validateMin(string $field, mixed $value, mixed $min, array $allRules = []): ?string
     {
         if ($value === null || $value === '') {
             return null;
@@ -339,18 +369,21 @@ abstract class Controller
 
         $min = (int) $min;
 
-        if (is_string($value) && strlen($value) < $min) {
-            return "The {$field} must be at least {$min} characters.";
+        if ($this->isNumericContext($allRules, $value)) {
+            if (is_numeric($value) && $value < $min) {
+                return "The {$field} must be at least {$min}.";
+            }
+            return null;
         }
 
-        if (is_numeric($value) && $value < $min) {
-            return "The {$field} must be at least {$min}.";
+        if (is_string($value) && strlen($value) < $min) {
+            return "The {$field} must be at least {$min} characters.";
         }
 
         return null;
     }
 
-    private function validateMax(string $field, mixed $value, mixed $max): ?string
+    private function validateMax(string $field, mixed $value, mixed $max, array $allRules = []): ?string
     {
         if ($value === null || $value === '') {
             return null;
@@ -358,25 +391,28 @@ abstract class Controller
 
         $max = (int) $max;
 
-        if (is_string($value) && strlen($value) > $max) {
-            return "The {$field} may not be greater than {$max} characters.";
+        if ($this->isNumericContext($allRules, $value)) {
+            if (is_numeric($value) && $value > $max) {
+                return "The {$field} may not be greater than {$max}.";
+            }
+            return null;
         }
 
-        if (is_numeric($value) && $value > $max) {
-            return "The {$field} may not be greater than {$max}.";
+        if (is_string($value) && strlen($value) > $max) {
+            return "The {$field} may not be greater than {$max} characters.";
         }
 
         return null;
     }
 
-    private function validateBetween(string $field, mixed $value, mixed $min, mixed $max): ?string
+    private function validateBetween(string $field, mixed $value, mixed $min, mixed $max, array $allRules = []): ?string
     {
-        $minError = $this->validateMin($field, $value, $min);
+        $minError = $this->validateMin($field, $value, $min, $allRules);
         if ($minError) {
             return $minError;
         }
 
-        return $this->validateMax($field, $value, $max);
+        return $this->validateMax($field, $value, $max, $allRules);
     }
 
     private function validateIn(string $field, mixed $value, array $allowed): ?string

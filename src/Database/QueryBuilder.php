@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KallioMicro\Database;
 
 use InvalidArgumentException;
+use RuntimeException;
 
 /**
  * QueryBuilder - Fluent SQL query builder
@@ -17,7 +18,7 @@ class QueryBuilder
     private Connection $connection;
     private string $table;
 
-    /** @var string[] */
+    /** @var array<int, string|RawExpression> */
     private array $columns = ['*'];
 
     /** @var array<int, array{type: string, table: string, first: string, operator: string, second: string}> */
@@ -55,7 +56,15 @@ class QueryBuilder
      */
     public function select(string|array $columns = ['*']): self
     {
-        $this->columns = is_array($columns) ? $columns : func_get_args();
+        $columns = is_array($columns) ? $columns : func_get_args();
+
+        foreach ($columns as $column) {
+            if (!$column instanceof RawExpression) {
+                $this->validateIdentifier($column);
+            }
+        }
+
+        $this->columns = $columns;
         return $this;
     }
 
@@ -64,6 +73,10 @@ class QueryBuilder
      */
     public function addSelect(string ...$columns): self
     {
+        foreach ($columns as $column) {
+            $this->validateIdentifier($column);
+        }
+
         if ($this->columns === ['*']) {
             $this->columns = [];
         }
@@ -106,12 +119,16 @@ class QueryBuilder
 
     private function addJoin(string $type, string $table, string $first, string $operator, string $second): self
     {
+        if (!in_array(strtoupper($operator), ['=', '!=', '<>', '<', '>', '<=', '>=', 'LIKE'], true)) {
+            throw new InvalidArgumentException("Invalid JOIN operator: {$operator}");
+        }
+
         $this->joins[] = [
             'type' => $type,
-            'table' => $table,
-            'first' => $first,
+            'table' => $this->validateIdentifier($table),
+            'first' => $this->validateIdentifier($first),
             'operator' => $operator,
-            'second' => $second,
+            'second' => $this->validateIdentifier($second),
         ];
         return $this;
     }
@@ -121,7 +138,7 @@ class QueryBuilder
      */
     public function where(string $column, mixed $operatorOrValue = null, mixed $value = null): self
     {
-        return $this->addWhere('basic', $column, $operatorOrValue, $value, 'AND');
+        return $this->addWhere('basic', $column, $operatorOrValue, $value, 'AND', func_num_args());
     }
 
     /**
@@ -129,7 +146,7 @@ class QueryBuilder
      */
     public function orWhere(string $column, mixed $operatorOrValue = null, mixed $value = null): self
     {
-        return $this->addWhere('basic', $column, $operatorOrValue, $value, 'OR');
+        return $this->addWhere('basic', $column, $operatorOrValue, $value, 'OR', func_num_args());
     }
 
     /**
@@ -209,8 +226,21 @@ class QueryBuilder
      */
     public function whereRaw(string $sql, array $bindings = []): self
     {
+        // The builder uses named placeholders internally, so rewrite each positional
+        // ? in the fragment to a fresh named key bound to the matching value.
+        $placeholderCount = substr_count($sql, '?');
+        if ($placeholderCount !== count($bindings)) {
+            throw new InvalidArgumentException(sprintf(
+                'whereRaw() placeholder count (%d) does not match binding count (%d)',
+                $placeholderCount,
+                count($bindings)
+            ));
+        }
+
         foreach ($bindings as $value) {
-            $this->addBinding($value);
+            $key = $this->addBinding($value);
+            $position = strpos($sql, '?');
+            $sql = substr_replace($sql, ':' . $key, (int) $position, 1);
         }
 
         $this->wheres[] = [
@@ -223,12 +253,24 @@ class QueryBuilder
         return $this;
     }
 
-    private function addWhere(string $type, string $column, mixed $operatorOrValue, mixed $value, string $boolean): self
+    private function addWhere(string $type, string $column, mixed $operatorOrValue, mixed $value, string $boolean, int $numArgs = 3): self
     {
-        // Handle where('column', 'value') shorthand for equality
-        if ($value === null && $operatorOrValue !== null) {
+        if ($numArgs === 2) {
+            // where('column', $value) shorthand: equality, or IS NULL when $value is null
+            if ($operatorOrValue === null) {
+                return $this->addNullWhere($column, false, $boolean);
+            }
             $value = $operatorOrValue;
             $operatorOrValue = '=';
+        } elseif ($value === null) {
+            // Explicit null comparison: SQL "= NULL" never matches, so map to IS (NOT) NULL
+            return match (strtoupper((string) $operatorOrValue)) {
+                '=' => $this->addNullWhere($column, false, $boolean),
+                '!=', '<>' => $this->addNullWhere($column, true, $boolean),
+                default => throw new InvalidArgumentException(
+                    "Cannot compare column {$column} to NULL with operator {$operatorOrValue}; use whereNull()/whereNotNull()"
+                ),
+            };
         }
 
         $bindingKey = $this->addBinding($value);
@@ -244,8 +286,32 @@ class QueryBuilder
         return $this;
     }
 
+    private function addNullWhere(string $column, bool $not, string $boolean): self
+    {
+        $this->wheres[] = [
+            'type' => $not ? 'notNull' : 'null',
+            'column' => $column,
+            'operator' => $not ? 'IS NOT' : 'IS',
+            'value' => null,
+            'boolean' => $boolean,
+        ];
+        return $this;
+    }
+
     private function addWhereIn(string $column, array $values, string $boolean, bool $not): self
     {
+        if ($values === []) {
+            // IN () is invalid SQL. An empty IN list matches nothing; an empty NOT IN list matches everything.
+            $this->wheres[] = [
+                'type' => 'raw',
+                'column' => $not ? '1 = 1' : '0 = 1',
+                'operator' => '',
+                'value' => null,
+                'boolean' => $boolean,
+            ];
+            return $this;
+        }
+
         $placeholders = [];
         foreach ($values as $value) {
             $placeholders[] = $this->addBinding($value);
@@ -381,7 +447,7 @@ class QueryBuilder
      */
     public function value(string $column): mixed
     {
-        $this->columns = [$column];
+        $this->columns = [$this->validateIdentifier($column)];
         return $this->connection->selectValue($this->toSql(), $this->bindings);
     }
 
@@ -392,6 +458,11 @@ class QueryBuilder
      */
     public function pluck(string $column, ?string $key = null): array
     {
+        $this->validateIdentifier($column);
+        if ($key !== null) {
+            $this->validateIdentifier($key);
+        }
+
         $this->columns = $key ? [$key, $column] : [$column];
         $results = $this->get();
 
@@ -411,7 +482,8 @@ class QueryBuilder
      */
     public function count(string $column = '*'): int
     {
-        $this->columns = ["COUNT({$column}) as aggregate"];
+        $column = $this->validateIdentifier($column);
+        $this->columns = [new RawExpression("COUNT({$column}) as aggregate")];
         return (int) ($this->first()['aggregate'] ?? 0);
     }
 
@@ -420,7 +492,8 @@ class QueryBuilder
      */
     public function sum(string $column): float
     {
-        $this->columns = ["SUM({$column}) as aggregate"];
+        $column = $this->validateIdentifier($column);
+        $this->columns = [new RawExpression("SUM({$column}) as aggregate")];
         return (float) ($this->first()['aggregate'] ?? 0);
     }
 
@@ -429,7 +502,8 @@ class QueryBuilder
      */
     public function avg(string $column): float
     {
-        $this->columns = ["AVG({$column}) as aggregate"];
+        $column = $this->validateIdentifier($column);
+        $this->columns = [new RawExpression("AVG({$column}) as aggregate")];
         return (float) ($this->first()['aggregate'] ?? 0);
     }
 
@@ -438,7 +512,8 @@ class QueryBuilder
      */
     public function min(string $column): mixed
     {
-        $this->columns = ["MIN({$column}) as aggregate"];
+        $column = $this->validateIdentifier($column);
+        $this->columns = [new RawExpression("MIN({$column}) as aggregate")];
         return $this->first()['aggregate'] ?? null;
     }
 
@@ -447,7 +522,8 @@ class QueryBuilder
      */
     public function max(string $column): mixed
     {
-        $this->columns = ["MAX({$column}) as aggregate"];
+        $column = $this->validateIdentifier($column);
+        $this->columns = [new RawExpression("MAX({$column}) as aggregate")];
         return $this->first()['aggregate'] ?? null;
     }
 
@@ -495,10 +571,22 @@ class QueryBuilder
      */
     public function update(array $data): int
     {
+        if (empty($this->wheres)) {
+            throw new RuntimeException(
+                'Refusing to UPDATE without a WHERE clause; add ->whereRaw(\'1 = 1\') to deliberately affect all rows.'
+            );
+        }
+
         $setParts = [];
         $bindings = $this->bindings;
 
         foreach ($data as $column => $value) {
+            if ($value instanceof RawExpression) {
+                // Raw expressions (e.g. increment/decrement) are inlined, never bound
+                $setParts[] = sprintf('%s = %s', $this->connection->quoteIdentifier($column), $value);
+                continue;
+            }
+
             $key = $this->generateBindingKey();
             $setParts[] = sprintf('%s = :%s', $this->connection->quoteIdentifier($column), $key);
             $bindings[$key] = $value;
@@ -520,6 +608,12 @@ class QueryBuilder
      */
     public function delete(): int
     {
+        if (empty($this->wheres)) {
+            throw new RuntimeException(
+                'Refusing to DELETE without a WHERE clause; add ->whereRaw(\'1 = 1\') to deliberately affect all rows.'
+            );
+        }
+
         $sql = sprintf(
             'DELETE FROM %s%s',
             $this->connection->quoteIdentifier($this->table),
@@ -535,6 +629,7 @@ class QueryBuilder
      */
     public function increment(string $column, int $amount = 1): int
     {
+        $column = $this->validateIdentifier($column);
         return $this->update([
             $column => new RawExpression("{$column} + {$amount}"),
         ]);
@@ -545,6 +640,7 @@ class QueryBuilder
      */
     public function decrement(string $column, int $amount = 1): int
     {
+        $column = $this->validateIdentifier($column);
         return $this->update([
             $column => new RawExpression("{$column} - {$amount}"),
         ]);
@@ -572,7 +668,12 @@ class QueryBuilder
 
     private function compileColumns(): string
     {
-        return implode(', ', $this->columns);
+        return implode(', ', array_map(
+            fn ($column) => $column instanceof RawExpression
+                ? (string) $column
+                : $this->connection->quoteIdentifier($column),
+            $this->columns
+        ));
     }
 
     private function compileJoins(): string
@@ -587,9 +688,9 @@ class QueryBuilder
                 ' %s JOIN %s ON %s %s %s',
                 $join['type'],
                 $this->connection->quoteIdentifier($join['table']),
-                $join['first'],
+                $this->connection->quoteIdentifier($join['first']),
                 $join['operator'],
-                $join['second']
+                $this->connection->quoteIdentifier($join['second'])
             );
         }
         return $sql;
@@ -713,6 +814,26 @@ class QueryBuilder
     private function generateBindingKey(): string
     {
         return 'p' . $this->bindingIndex++;
+    }
+
+    /**
+     * Validate an SQL identifier (column or table reference)
+     *
+     * Allows a bare identifier, a two-part table.column reference, table.* or *.
+     * Aliases (AS), functions, and cross-database references are rejected —
+     * use Connection raw queries with bindings for those.
+     */
+    private function validateIdentifier(string $identifier): string
+    {
+        if ($identifier === '*') {
+            return $identifier;
+        }
+
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*|\.\*)?$/', $identifier)) {
+            throw new InvalidArgumentException("Invalid identifier: {$identifier}");
+        }
+
+        return $identifier;
     }
 
     /**

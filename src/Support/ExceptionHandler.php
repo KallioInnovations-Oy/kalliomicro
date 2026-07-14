@@ -367,11 +367,14 @@ HTML;
     {
         http_response_code($response->getStatusCode());
 
-        foreach ($response->getHeaders() as $name => $value) {
-            header("{$name}: {$value}");
+        // Response stores headers as name => string[] (multi-value)
+        foreach ($response->getHeaders() as $name => $values) {
+            foreach ((array) $values as $value) {
+                header("{$name}: {$value}", false);
+            }
         }
 
-        echo $response->getBody();
+        echo $response->getContent();
         exit(1);
     }
 

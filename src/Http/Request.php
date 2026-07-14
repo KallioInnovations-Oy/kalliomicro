@@ -66,6 +66,17 @@ class Request
         $this->content = $content;
 
         $this->method = strtoupper($server['REQUEST_METHOD'] ?? 'GET');
+
+        // Method spoofing: a POST may promote itself to PUT/PATCH/DELETE via the
+        // _method field ($view->method('PUT')). Only POST can spoof, and only to
+        // those three verbs — a real PUT/PATCH/DELETE is never demoted.
+        if ($this->method === 'POST' && isset($post['_method'])) {
+            $override = strtoupper((string) $post['_method']);
+            if (in_array($override, ['PUT', 'PATCH', 'DELETE'], true)) {
+                $this->method = $override;
+            }
+        }
+
         $this->uri = $server['REQUEST_URI'] ?? '/';
         $this->queryString = $server['QUERY_STRING'] ?? '';
 

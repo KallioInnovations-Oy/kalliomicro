@@ -90,6 +90,15 @@ class Route
     }
 
     /**
+     * Check if this route matches the given path regardless of HTTP method
+     * (used to distinguish 405 from 404)
+     */
+    public function matchesPath(string $path): bool
+    {
+        return (bool) preg_match($this->pattern, $path);
+    }
+
+    /**
      * Extract route parameters from the path
      *
      * @return array<string, string>

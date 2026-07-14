@@ -195,6 +195,17 @@ class Router
      */
     public function url(string $name, array $params = []): string
     {
+        // Names set via Route::name() are resolved lazily on first lookup,
+        // so routes registered after this Router was created still resolve.
+        if (!isset($this->namedRoutes[$name])) {
+            foreach ($this->routes as $route) {
+                if ($route->getName() === $name) {
+                    $this->namedRoutes[$name] = $route;
+                    break;
+                }
+            }
+        }
+
         if (!isset($this->namedRoutes[$name])) {
             throw new RuntimeException("Route [{$name}] not found.");
         }
@@ -210,6 +221,8 @@ class Router
         $method = $request->method();
         $path = $request->path();
 
+        $allowedMethods = [];
+
         foreach ($this->routes as $route) {
             if ($route->matches($method, $path)) {
                 $params = $route->extractParams($path);
@@ -217,6 +230,14 @@ class Router
 
                 return $this->runRoute($route, $request);
             }
+
+            if ($route->matchesPath($path)) {
+                $allowedMethods[$route->getMethod()] = true;
+            }
+        }
+
+        if ($allowedMethods !== []) {
+            return $this->handleMethodNotAllowed($request, array_keys($allowedMethods));
         }
 
         return $this->handleNotFound($request);
@@ -311,6 +332,26 @@ class Router
         }
 
         return Response::html('<h1>404 - Not Found</h1>', 404);
+    }
+
+    /**
+     * Handle 405 Method Not Allowed (path exists under a different HTTP method)
+     *
+     * @param string[] $allowedMethods
+     */
+    private function handleMethodNotAllowed(Request $request, array $allowedMethods): Response
+    {
+        $allow = implode(', ', $allowedMethods);
+
+        if ($request->wantsJson()) {
+            return Response::json([
+                'error' => true,
+                'message' => 'Method Not Allowed',
+            ], 405)->header('Allow', $allow);
+        }
+
+        return Response::html('<h1>405 - Method Not Allowed</h1>', 405)
+            ->header('Allow', $allow);
     }
 
     /**
