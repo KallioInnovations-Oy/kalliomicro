@@ -13,15 +13,20 @@ use KallioMicro\Console\Input;
  * This command should be called every minute by cron:
  * * * * * * php /path/to/console schedule:run >> /dev/null 2>&1
  *
- * Scope: due tasks run inline, sequentially, with NO overlap protection —
- * the base scheduler assumes fast, idempotent tasks on a single host. A
- * task that can outlive its schedule interval must acquire its own lock
- * inside handle() (see Console::schedule() for the pattern).
+ * Due tasks run inline, sequentially, each under a per-task non-blocking
+ * flock (storage/framework/schedule-*.lock): a task still running from a
+ * previous tick is skipped, not doubled, and the kernel drops the lock if
+ * the process dies. The lock is host-local — running schedule:run on
+ * multiple hosts still requires a distributed lock inside handle() (see
+ * Console::schedule()). Lock files are never unlinked: removing a file
+ * while another process holds its lock lets two holders "lock" different
+ * inodes of the same path.
  */
 class ScheduleRunCommand extends Command
 {
     protected string $name = 'schedule:run';
     protected string $description = 'Run scheduled tasks that are due';
+    private ?string $lockDirectory = null;
     protected array $options = [
         'list' => 'Show all scheduled tasks without running them',
         'force' => 'Force run all scheduled tasks regardless of schedule',
@@ -45,12 +50,34 @@ class ScheduleRunCommand extends Command
         $currentTime = new \DateTime();
         $tasksRun = 0;
         $tasksFailed = 0;
+        $tasksSkipped = 0;
         $forceRun = $input->hasOption('force');
 
-        foreach ($tasks as $name => $task) {
-            $isDue = $forceRun || $this->isDue($task['schedule'], $currentTime);
+        foreach ($tasks as $task) {
+            $name = $task['command'];
 
-            if ($isDue) {
+            if (!$forceRun && !$this->isDue($task['schedule'], $currentTime)) {
+                continue;
+            }
+
+            // --force bypasses the due-check, never the lock. A lock-infra
+            // failure (permissions on one lock file) fails THIS task loudly
+            // but must not abort the remaining due tasks.
+            try {
+                $lock = $this->acquireLock($name);
+            } catch (\RuntimeException $e) {
+                $this->error("  {$name}: {$e->getMessage()}");
+                $tasksFailed++;
+                continue;
+            }
+
+            if ($lock === null) {
+                $this->comment("Skipping {$name}: previous run still in progress.");
+                $tasksSkipped++;
+                continue;
+            }
+
+            try {
                 $this->info("Running: {$name}");
 
                 $startTime = microtime(true);
@@ -64,23 +91,68 @@ class ScheduleRunCommand extends Command
                     $this->error("  Failed (exit code: {$result})");
                     $tasksFailed++;
                 }
+            } finally {
+                flock($lock, LOCK_UN);
+                fclose($lock);
             }
         }
 
-        if ($tasksRun === 0 && $tasksFailed === 0) {
+        if ($tasksRun === 0 && $tasksFailed === 0 && $tasksSkipped === 0) {
             $this->comment('No scheduled tasks are due.');
         } else {
             $this->line('');
-            $this->info("Tasks run: {$tasksRun}, Failed: {$tasksFailed}");
+            $this->info("Tasks run: {$tasksRun}, Failed: {$tasksFailed}, Skipped: {$tasksSkipped}");
         }
 
         return $tasksFailed > 0 ? 1 : 0;
     }
 
     /**
+     * Acquire the per-task overlap lock, or report the task as still running.
+     *
+     * @return resource|null Lock handle to release after execution, or null
+     *                       when a previous run of the task still holds it.
+     */
+    private function acquireLock(string $taskName)
+    {
+        $dir = $this->lockDirectory ??= $this->ensureLockDirectory();
+
+        // 'task:backup' → 'task-backup'; the md5 suffix keeps sanitized
+        // collisions ('a:b' vs 'a-b') on distinct lock files.
+        $safe = preg_replace('/[^A-Za-z0-9_\-]+/', '-', $taskName);
+        $path = $dir . '/schedule-' . $safe . '-' . substr(md5($taskName), 0, 8) . '.lock';
+
+        $handle = fopen($path, 'c'); // create-or-open, never truncates
+        if ($handle === false) {
+            throw new \RuntimeException(
+                "Unable to open scheduler lock file {$path}; check storage/framework permissions."
+            );
+        }
+
+        if (!flock($handle, LOCK_EX | LOCK_NB)) {
+            fclose($handle);
+            return null;
+        }
+
+        return $handle;
+    }
+
+    private function ensureLockDirectory(): string
+    {
+        $dir = $this->app()->storagePath('framework');
+        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+            throw new \RuntimeException(
+                "Unable to create scheduler lock directory {$dir}; check storage/ permissions."
+            );
+        }
+
+        return $dir;
+    }
+
+    /**
      * List all scheduled tasks
      *
-     * @param array<string, array{command: string, schedule: string}> $tasks
+     * @param array<int, array{command: string, schedule: string}> $tasks
      */
     private function listScheduledTasks(array $tasks): int
     {
@@ -91,11 +163,11 @@ class ScheduleRunCommand extends Command
         $rows = [];
         $currentTime = new \DateTime();
 
-        foreach ($tasks as $name => $task) {
+        foreach ($tasks as $task) {
             $isDue = $this->isDue($task['schedule'], $currentTime) ? 'Yes' : 'No';
             $nextRun = $this->getNextRunTime($task['schedule']);
 
-            $rows[] = [$name, $task['schedule'], $isDue, $nextRun];
+            $rows[] = [$task['command'], $task['schedule'], $isDue, $nextRun];
         }
 
         $this->table(['Command', 'Schedule', 'Due Now', 'Next Run'], $rows);
@@ -139,22 +211,17 @@ class ScheduleRunCommand extends Command
             return (int) $field === $value;
         }
 
-        // Range: 1-5
-        if (str_contains($field, '-')) {
-            [$start, $end] = explode('-', $field, 2);
-            return $value >= (int) $start && $value <= (int) $end;
-        }
-
-        // List: 1,3,5
-        if (str_contains($field, ',')) {
-            $values = array_map('intval', explode(',', $field));
-            return in_array($value, $values, true);
-        }
-
-        // Step: */5 or 0-30/5
+        // Step: */5 or 0-30/5 — must be checked before the plain range branch,
+        // or '0-30/5' is misread as the range 0-30 and the step is ignored
         if (str_contains($field, '/')) {
             [$range, $step] = explode('/', $field, 2);
             $step = (int) $step;
+
+            // '*/0' or a non-numeric step must not take down the whole tick
+            // with a DivisionByZeroError — a malformed field is never due.
+            if ($step <= 0) {
+                return false;
+            }
 
             if ($range === '*') {
                 return $value % $step === 0;
@@ -167,6 +234,20 @@ class ScheduleRunCommand extends Command
                 }
                 return ($value - (int) $start) % $step === 0;
             }
+
+            return false;
+        }
+
+        // Range: 1-5
+        if (str_contains($field, '-')) {
+            [$start, $end] = explode('-', $field, 2);
+            return $value >= (int) $start && $value <= (int) $end;
+        }
+
+        // List: 1,3,5
+        if (str_contains($field, ',')) {
+            $values = array_map('intval', explode(',', $field));
+            return in_array($value, $values, true);
         }
 
         return false;

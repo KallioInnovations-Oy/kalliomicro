@@ -2,7 +2,7 @@
 
 > Sources: `src/Core/`, `src/Support/`, `public/index.php`, `console`, `config/`, `composer.json`.
 
-KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.0.0'`). One production dependency: `phpmailer/phpmailer`. Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
+KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.1.0'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
 
 ## Design philosophy
 
@@ -18,10 +18,10 @@ KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION =
 | `src/Core/` | nothing | `Application`, `Container`, `Config` |
 | `src/Database/` | standalone | `Connection`, `QueryBuilder` (+ `RawExpression`) |
 | `src/View/` | standalone | `ViewEngine` |
-| `src/Http/` | Core, Database, View, Auth | `Request`, `Response`, `ApiResponse`, `Controller`, `HttpException`, `MiddlewareInterface` |
+| `src/Http/` | Core, Database, View, Auth | `Request`, `Response`, `ApiResponse`, `Controller`, `HttpException` |
 | `src/Routing/` | Core, Http | `Router`, `Route` |
 | `src/Auth/` | Core, Database | `AuthManager` (+ `AuthResult`, provider interfaces), `Providers/`, `Session` |
-| `src/Middleware/` | Http, Auth | `Auth`/`Guest`/`Role`/`Profile`/`Csrf` middleware |
+| `src/Middleware/` | Http, Auth | `MiddlewareInterface`, abstract `Middleware`, `Auth`/`Guest`/`Role`/`Profile`/`Csrf` middleware (one class per file — required for PSR-4 class-string resolution) |
 | `src/Console/` | Core, Support | `Console` kernel, `Command`, `Input`, built-in commands |
 | `src/Support/` | Core | `helpers.php`, `DotEnv`, `Logger`, `ExceptionHandler`, `Communicator` |
 

@@ -22,6 +22,10 @@ Thumbs.db
 # Cache
 /storage/cache/*
 !/storage/cache/.gitkeep
+/.phpunit.cache/
+
+# Scheduler locks
+/storage/framework/*.lock
 
 # Sessions
 /storage/sessions/*

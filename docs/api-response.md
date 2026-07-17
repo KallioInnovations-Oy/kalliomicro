@@ -89,7 +89,7 @@ Notes:
 
 - **Modal sizes:** `size` becomes the Bootstrap dialog class `modal-{size}` — only `sm`, `lg`, `xl` are real Bootstrap classes; `md` (default width) and `full` are effectively no-ops.
 - **`refresh_table` semantics:** with jQuery + DataTables loaded, the table redraws in place; without them (the shipped layout loads neither) it falls back to a **full page reload** so state is always reflected. For partial updates without a reload, prefer `replace('#table tbody', $rowsHtml)` — the pattern the demo `AssessmentController::search()` uses.
-- ⚠ **`validationError()` field errors are not rendered per-field** by the stock client — `data.validation_errors` is ignored; only the message is flashed. The client's own `validateForm()` pre-checks `[required]` fields before submitting. Render server-side errors yourself (re-render the form partial via `replace`/`modal`) or extend the client.
+- **`validationError()` field errors render per-field.** The client reads `data.validation_errors` (`field => messages`), marks each matching `[name="field"]` input `is-invalid`, and shows the message in an adjacent `.invalid-feedback` (a template-authored one is reused — its original text is remembered in `data-km-original` and restored on clear; otherwise one is created, tagged `data-km-error`). The first invalid field is focused; errors clear on the next submit of the same form. Rendering is **strictly scoped to the submitting form** (resolved from the trigger element); when no form is resolvable (e.g. a standalone action button), nothing is rendered — the flash message alone reports the failure, so unrelated forms are never touched. The client's own `validateForm()` still pre-checks `[required]` fields before submitting.
 
 ---
 

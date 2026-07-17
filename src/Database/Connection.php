@@ -226,6 +226,12 @@ class Connection
      */
     public function update(string $table, array $data, array $where): int
     {
+        if ($where === []) {
+            throw new RuntimeException(
+                'Refusing to UPDATE without conditions; use query() with explicit SQL to deliberately affect all rows.'
+            );
+        }
+
         $setParts = [];
         $bindings = [];
 
@@ -261,6 +267,12 @@ class Connection
      */
     public function delete(string $table, array $where): int
     {
+        if ($where === []) {
+            throw new RuntimeException(
+                'Refusing to DELETE without conditions; use query() with explicit SQL to deliberately affect all rows.'
+            );
+        }
+
         $whereParts = [];
         $bindings = [];
 

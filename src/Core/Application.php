@@ -12,6 +12,7 @@ use KallioMicro\Routing\Router;
 use KallioMicro\Database\Connection;
 use KallioMicro\View\ViewEngine;
 use KallioMicro\Auth\Session;
+use KallioMicro\Middleware\MiddlewareInterface;
 use Closure;
 use Throwable;
 
@@ -23,7 +24,7 @@ use Throwable;
  */
 class Application extends Container
 {
-    private const VERSION = '1.0.0';
+    private const VERSION = '1.1.0';
 
     private static ?Application $instance = null;
 
@@ -33,7 +34,7 @@ class Application extends Container
     /** @var array<class-string, Closure> */
     private array $bootCallbacks = [];
 
-    /** @var array<Closure> */
+    /** @var array<int, Closure|string> */
     private array $middleware = [];
 
     public function __construct(string $basePath)
@@ -103,7 +104,11 @@ class Application extends Container
 
         // Request
         $this->singleton(Request::class, function () {
-            return Request::capture();
+            $request = Request::capture();
+            $request->setTrustedProxies(
+                (array) $this->make(Config::class)->get('app.trusted_proxies', [])
+            );
+            return $request;
         });
         $this->alias(Request::class, 'request');
 
@@ -141,8 +146,12 @@ class Application extends Container
 
     /**
      * Add global middleware
+     *
+     * Accepts a Closure(Request, Closure): Response, or a class-string of a
+     * MiddlewareInterface implementation (resolved through the container when
+     * the request is handled). Parameterized middleware use the closure form.
      */
-    public function middleware(Closure $middleware): self
+    public function middleware(Closure|string $middleware): self
     {
         $this->middleware[] = $middleware;
         return $this;
@@ -193,8 +202,10 @@ class Application extends Container
 
     private function runMiddleware(Request $request, Closure $destination): Response
     {
+        $middleware = array_map($this->resolveMiddleware(...), $this->middleware);
+
         $pipeline = array_reduce(
-            array_reverse($this->middleware),
+            array_reverse($middleware),
             function (Closure $next, Closure $middleware) {
                 return function (Request $request) use ($next, $middleware) {
                     return $middleware($request, $next);
@@ -204,6 +215,35 @@ class Application extends Container
         );
 
         return $pipeline($request);
+    }
+
+    /**
+     * Normalize a middleware entry to a pipeline closure
+     *
+     * Single owner of the "what counts as valid middleware" contract — the
+     * Router delegates here so route and global middleware can never drift.
+     * Class-strings resolve through the container lazily, at invocation: a
+     * middleware behind one that short-circuits is never constructed.
+     */
+    public function resolveMiddleware(Closure|string $middleware): Closure
+    {
+        if ($middleware instanceof Closure) {
+            return $middleware;
+        }
+
+        return function (Request $request, Closure $next) use ($middleware): Response {
+            $instance = $this->make($middleware);
+
+            if (!$instance instanceof MiddlewareInterface) {
+                throw new \RuntimeException(sprintf(
+                    'Middleware [%s] must implement %s or be a Closure(Request, Closure): Response.',
+                    $middleware,
+                    MiddlewareInterface::class
+                ));
+            }
+
+            return $instance->handle($request, $next);
+        };
     }
 
     private function dispatchToRouter(Request $request): Response
@@ -217,19 +257,30 @@ class Application extends Container
         $config = $this->make(Config::class);
         $debug = $config->get('app.debug', false);
 
+        // requireCsrf() (403), HttpException::notFound() (404), etc. must
+        // surface at their declared status — a blanket 500 breaks the
+        // documented "abort with a specific HTTP status from anywhere" path.
+        $status = \KallioMicro\Support\ExceptionHandler::getHttpCode($e);
+        $headers = $e instanceof \KallioMicro\Http\HttpException ? $e->getHeaders() : [];
+
         if ($request->expectsJson()) {
-            return Response::json([
+            $response = Response::json([
                 'error' => true,
-                'message' => $debug ? $e->getMessage() : 'Internal Server Error',
+                'message' => $debug || $status < 500 ? $e->getMessage() : 'Internal Server Error',
                 'trace' => $debug ? $e->getTrace() : null,
-            ], 500);
+            ], $status);
+        } else {
+            $response = Response::html('', $status);
+            $response->content($debug
+                ? sprintf('<h1>Error</h1><pre>%s</pre><pre>%s</pre>', $e->getMessage(), $e->getTraceAsString())
+                : sprintf('<h1>%d - %s</h1>', $status, $response->getStatusText()));
         }
 
-        $message = $debug
-            ? sprintf('<h1>Error</h1><pre>%s</pre><pre>%s</pre>', $e->getMessage(), $e->getTraceAsString())
-            : '<h1>500 - Internal Server Error</h1>';
+        foreach ($headers as $name => $value) {
+            $response->header($name, $value);
+        }
 
-        return Response::html($message, 500);
+        return $response;
     }
 
     /**

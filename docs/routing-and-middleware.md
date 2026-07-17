@@ -29,7 +29,7 @@ Handlers: `[Controller::class, 'method']` (preferred), a `Closure`, or `'Control
 
 ### Route parameters and constraints
 
-- `{param}` matches one non-slash segment; `{param?}` is optional. Trailing slashes are always optional.
+- `{param}` matches one non-slash segment; `{param?}` makes the **value** optional but not its separator slash — `/users/{id?}` matches `/users/` and `/users/5`, **not** `/users` (register a separate `/users` route for the bare path). Trailing slashes are always optional.
 - Constraints: `->where('id', '[0-9]+')`, `->whereArray()`, `->whereNumber()`, `->whereAlpha()`, `->whereAlphaNumeric()`, `->whereUuid()`; defaults for optional params via `->default('param', 'value')`.
 - Params arrive as string arguments after `$request` (by name), and via `$request->route('param')`.
 
@@ -48,18 +48,23 @@ Handlers: `[Controller::class, 'method']` (preferred), a `Closure`, or `'Control
 
 ## Middleware
 
-Contract: `KallioMicro\Http\MiddlewareInterface::handle(Request $request, Closure $next): Response`. A middleware short-circuits by returning a `Response` without calling `$next($request)`.
+Contract: `KallioMicro\Middleware\MiddlewareInterface::handle(Request $request, Closure $next): Response`. A middleware short-circuits by returning a `Response` without calling `$next($request)`.
 
 Two tiers:
 
-- **Global middleware** — closures registered with `Application::middleware()` in `public/index.php`; run for every request, outermost-first in registration order. The shipped global middleware starts the session.
-- **Route middleware** — attached to routes/groups. ⚠ `Route::middleware()` accepts **closures only** — class-string middleware is wrapped at the route file:
+- **Global middleware** — registered with `Application::middleware()` in `public/index.php`; run for every request, outermost-first in registration order. The shipped global middleware starts the session.
+- **Route middleware** — attached to routes/groups via `Route::middleware()` or the group `middleware` array.
+
+Both tiers accept a **closure** (`Closure(Request, Closure): Response`) or a **class-string** of a `MiddlewareInterface` implementation. Class-strings are resolved through the container at dispatch time, so constructor dependencies auto-wire:
 
 ```php
 'middleware' => [
-    fn ($req, $next) => (new AuthMiddleware(app(Session::class)))->handle($req, $next),
+    AuthMiddleware::class,                     // container-resolved, Session auto-wires
+    fn ($req, $next) => (new RoleMiddleware(app(Session::class), 'admin'))->handle($req, $next),
 ],
 ```
+
+Parameterized middleware (variadic roles, a custom `$except` list) keep the closure form — the container cannot guess those arguments. A class-string that doesn't implement `MiddlewareInterface` throws a `RuntimeException` naming the class at dispatch; a nonexistent class throws from the container.
 
 ### Middleware catalog
 
@@ -85,14 +90,14 @@ Roles and `profile_id` are read straight from the session user array — the fra
 - Headers are case-insensitive (`header('x-csrf-token')`); cookies via `cookie()`; uploads via `file()`/`hasFile()`.
 - Content negotiation: `expectsJson()` (Accept), `isJson()` (Content-Type), `isAjax()` (X-Requested-With — kalliomicro.js sets it on every request), `wantsJson()` = either.
 - Route params: `route($key)` / `routeParams()`; middleware-to-controller data: `setAttribute()` / `getAttribute()`.
-- ⚠ **`ip()` blindly trusts `X-Forwarded-For`** (returns its first entry when present, else `REMOTE_ADDR`). Behind anything other than a trusted proxy that overwrites the header, the client controls this value — do not use it for security decisions without infrastructure guarantees.
+- **`ip()` requires trusted proxies for `X-Forwarded-For`.** By default (empty `app.trusted_proxies`) it returns `REMOTE_ADDR` and ignores XFF entirely. When `REMOTE_ADDR` is listed in `app.trusted_proxies` (exact-match IPs), the client is the **rightmost** XFF entry that is not itself a trusted proxy — the first entry is client-forgeable, since proxies append. No CIDR support; list each proxy IP. **Scope note:** proxy awareness covers `ip()` only — `isSecure()`, `url()`, and the `Host` header do **not** consult `X-Forwarded-Proto`/`X-Forwarded-Host`; behind a TLS-terminating proxy, configure the proxy to pass `Host` through and terminate scheme decisions at the infrastructure.
 
 ## Response
 
 `KallioMicro\Http\Response` factories:
 
 ```php
-Response::json(array|object $data, int $status = 200)   // JSON_UNESCAPED_UNICODE, throws on encode failure
+Response::json(array|object $data, int $status = 200, int $flags = 0)   // $flags OR'd with JSON_UNESCAPED_UNICODE; throws on encode failure
 Response::html(string $content, int $status = 200)
 Response::text(string $content, int $status = 200)
 Response::noContent()                                   // 204
@@ -129,7 +134,7 @@ protected function wantsJson(): bool
 
 // CSRF
 protected function verifyCsrf(): bool     // csrf_token field OR X-CSRF-Token header, hash_equals
-protected function requireCsrf(): void    // throws on mismatch — see ⚠ below
+protected function requireCsrf(): void    // throws on mismatch — see note below
 
 // Auth
 protected function isAuthenticated(): bool
@@ -148,7 +153,7 @@ protected function table(string $table): QueryBuilder
 
 **Every state-changing method (store/update/destroy) calls `$this->requireCsrf()` as its first line.** It throws `RuntimeException('CSRF token mismatch', 403)`, which the exception handler renders as a proper 403. An empty `csrf_token` field never shadows the `X-CSRF-Token` header (both `verifyCsrf()` and `CsrfMiddleware` fall through on null *or* empty).
 
-⚠ Caveat (as of 2026-07-14): `back()` redirects to the raw `Referer` header (default `/`) — it does not verify same-origin; don't use it after security-sensitive actions.
+`back()` is same-origin safe: a cross-origin `Referer` host falls back to `/`, and a same-origin (or relative) referer is reduced to path + query via `Session::sanitizeRelativeUrl()` before redirecting. Missing `Referer` (or missing `Host` header) → `/`; bracketed IPv6 hosts compare correctly. The comparison uses the `Host` header the backend sees — behind a proxy that rewrites `Host`, same-origin referers are treated as cross-origin (configure `proxy_set_header Host $host` or accept the `/` fallback).
 
 There are **no** `can()` / `hasRole()` / `authorize()` helpers on the controller — role checks go through the session user (`$this->user()['roles']`) or route-level `RoleMiddleware`; permission systems are a downstream concern.
 

@@ -9,19 +9,6 @@ use KallioMicro\Http\Response;
 use Closure;
 
 /**
- * Middleware - Base middleware interface and common middleware implementations
- */
-interface MiddlewareInterface
-{
-    /**
-     * Handle the request
-     *
-     * @param Closure(Request): Response $next
-     */
-    public function handle(Request $request, Closure $next): Response;
-}
-
-/**
  * Abstract base class for middleware with helper methods
  */
 abstract class Middleware implements MiddlewareInterface

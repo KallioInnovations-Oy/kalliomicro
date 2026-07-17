@@ -238,7 +238,13 @@ class Container
             return $methodReflector->invokeArgs($class, $dependencies);
         }
 
-        return $callback(...$parameters);
+        // Closures get the same by-name resolution as methods: only declared
+        // parameters are passed, so a zero-arg closure handler doesn't fatal
+        // on "Unknown named parameter" when the router supplies 'request'.
+        $reflector = new \ReflectionFunction($callback(...));
+        $dependencies = $this->resolveDependencies($reflector->getParameters(), $parameters);
+
+        return $callback(...$dependencies);
     }
 
     /**

@@ -83,7 +83,7 @@ Reserved session keys: `_csrf_token`, `_last_regenerated`, `_authenticated`, `_u
 - **Native PHP file sessions.** There is no database session handler in the base — a multi-replica deployment (load-balanced containers with ephemeral disks) registers its own `SessionHandlerInterface` before scaling out.
 - **`impersonate()` is a mechanism, not a policy** — it swaps the session user for whatever array you pass, with no authorization check. The *caller* gates it (admin role check or equivalent); the base cannot know which role model a deployment uses.
 
-`setIntendedUrl()` sanitizes its input to a **same-origin relative path** (absolute URLs are reduced to path + query; protocol-relative, scheme-prefixed and backslash-prefixed values collapse to `/`) — the post-login redirect cannot become an open redirect even though `AuthMiddleware` feeds it the raw request URL.
+`setIntendedUrl()` sanitizes its input to a **same-origin relative path** (absolute URLs are reduced to path + query; protocol-relative, scheme-prefixed and backslash-prefixed values collapse to `/`) — the post-login redirect cannot become an open redirect even though `AuthMiddleware` feeds it the raw request URL. The sanitizer is `Session::sanitizeRelativeUrl()`, a `public static` pure function also backing `Controller::back()` — reuse it for any redirect target that a client can influence.
 
 These policy contracts are also documented **in the code** — `Session::impersonate()`, `AuthManager::attemptWith()` / `handleOAuthCallback()` carry docblocks stating what the caller owns, so the guidance is visible at the call site, not only here.
 

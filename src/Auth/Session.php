@@ -449,13 +449,16 @@ class Session
      */
     public function setIntendedUrl(string $url): void
     {
-        $this->set('_intended_url', $this->sanitizeRelativeUrl($url));
+        $this->set('_intended_url', self::sanitizeRelativeUrl($url));
     }
 
     /**
      * Reduce a URL to a safe same-origin relative path (+ query)
+     *
+     * Pure function, public static so other redirect sinks (Controller::back())
+     * reuse the same open-redirect defense instead of reimplementing it.
      */
-    private function sanitizeRelativeUrl(string $url): string
+    public static function sanitizeRelativeUrl(string $url): string
     {
         // Protocol-relative (//evil.com) — no salvageable path
         if (str_starts_with($url, '//')) {

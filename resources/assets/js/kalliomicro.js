@@ -138,8 +138,7 @@ const KallioMicro = (function() {
      * Submit a form via AJAX
      */
     function handleActionSubmit(element) {
-        const formId = element.dataset.form;
-        const form = formId ? document.getElementById(formId) : element.closest('form');
+        const form = resolveForm(element);
 
         if (!form) {
             console.error('Form not found for submit action');
@@ -249,7 +248,8 @@ const KallioMicro = (function() {
         url = url || form.action;
         const method = form.dataset.method || form.method || 'POST';
 
-        // Validate required fields
+        // Clear server-side errors from the previous attempt, then pre-check
+        clearValidationErrors(form);
         if (!validateForm(form)) {
             return;
         }
@@ -338,6 +338,11 @@ const KallioMicro = (function() {
         // Show message if present
         if (response.message) {
             flash(response.message, response.success ? 'success' : 'error');
+        }
+
+        // Per-field validation errors (ApiResponse::validationError → data.validation_errors)
+        if (response.data && response.data.validation_errors) {
+            renderValidationErrors(response.data.validation_errors, resolveForm(trigger));
         }
 
         // Execute actions
@@ -817,6 +822,66 @@ const KallioMicro = (function() {
         }
 
         return valid;
+    }
+
+    /**
+     * Find the form a response belongs to, from the element that triggered it
+     */
+    function resolveForm(trigger) {
+        if (!trigger) return null;
+        if (trigger.tagName === 'FORM') return trigger;
+        if (trigger.dataset.form) return document.getElementById(trigger.dataset.form);
+        return trigger.closest('form');
+    }
+
+    /**
+     * Remove is-invalid marks and generated feedback elements within scope.
+     * Template-authored .invalid-feedback elements are kept but restored to
+     * their original text if a server message overwrote it; only elements we
+     * created ([data-km-error]) are removed.
+     */
+    function clearValidationErrors(scope) {
+        scope.querySelectorAll('.is-invalid').forEach(el => el.classList.remove('is-invalid'));
+        scope.querySelectorAll('[data-km-error]').forEach(el => el.remove());
+        scope.querySelectorAll('[data-km-original]').forEach(el => {
+            el.textContent = el.getAttribute('data-km-original');
+            el.removeAttribute('data-km-original');
+        });
+    }
+
+    /**
+     * Render server-side per-field errors into the submitting form: mark
+     * fields is-invalid and show the message in an adjacent .invalid-feedback
+     * (reused if present, created if not). Without a resolvable form nothing
+     * is rendered — the flash message already reported the failure, and a
+     * document-wide scope would clear and mark fields in unrelated forms.
+     */
+    function renderValidationErrors(errors, form) {
+        if (!form) return;
+        clearValidationErrors(form);
+
+        let firstInvalid = null;
+        for (const [field, messages] of Object.entries(errors)) {
+            const input = form.querySelector(`[name="${CSS.escape(field)}"]`);
+            if (!input) continue;
+
+            input.classList.add('is-invalid');
+
+            let feedback = input.nextElementSibling;
+            if (!feedback || !feedback.classList.contains('invalid-feedback')) {
+                feedback = document.createElement('div');
+                feedback.className = 'invalid-feedback';
+                feedback.setAttribute('data-km-error', '');
+                input.insertAdjacentElement('afterend', feedback);
+            } else if (!feedback.hasAttribute('data-km-error') && !feedback.hasAttribute('data-km-original')) {
+                // Template-authored element: remember its text so the next
+                // clear restores the authored hint instead of a stale server message
+                feedback.setAttribute('data-km-original', feedback.textContent);
+            }
+            feedback.textContent = Array.isArray(messages) ? messages.join(' ') : String(messages);
+            firstInvalid = firstInvalid || input;
+        }
+        if (firstInvalid) firstInvalid.focus();
     }
 
     function setLoading(element, loading) {

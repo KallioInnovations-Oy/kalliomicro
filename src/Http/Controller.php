@@ -170,11 +170,27 @@ abstract class Controller
 
     /**
      * Create a redirect back response
+     *
+     * The Referer header is client-supplied: a cross-origin referer falls back
+     * to '/', and even a same-origin one is reduced to path + query so this
+     * can never become an open redirect.
      */
     protected function back(): Response
     {
         $referer = $this->request->header('referer', '/');
-        return Response::redirect($referer);
+
+        // parse_url on both sides: handles ports and bracketed IPv6 hosts
+        // uniformly ('[::1]:8080' → '::1'), and a missing Host header parses
+        // to null rather than crashing the comparison.
+        $refHost = parse_url($referer, PHP_URL_HOST);
+        $hostHeader = (string) $this->request->header('host', '');
+        $reqHost = $hostHeader === '' ? null : parse_url('http://' . $hostHeader, PHP_URL_HOST);
+
+        if (is_string($refHost) && strtolower($refHost) !== strtolower((string) $reqHost)) {
+            return Response::redirect('/');
+        }
+
+        return Response::redirect(Session::sanitizeRelativeUrl($referer));
     }
 
     // Request helpers
@@ -297,7 +313,11 @@ abstract class Controller
             'date' => $this->validateDate($field, $value),
             'regex' => $this->validateRegex($field, $value, $params[0] ?? ''),
             // A typo'd rule name silently passing is worse than an exception in dev
-            default => throw new \InvalidArgumentException("Unknown validation rule: {$rule}"),
+            default => throw new \InvalidArgumentException(
+                "Unknown validation rule: {$rule}. Shipped rules: required, email, numeric, integer, "
+                . "string, min, max, between, in, confirmed, url, date, regex. Database-aware rules "
+                . "(unique/exists) are intentionally not shipped — see docs/validation.md."
+            ),
         };
     }
 

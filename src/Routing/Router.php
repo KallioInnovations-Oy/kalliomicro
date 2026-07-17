@@ -30,12 +30,12 @@ class Router
     /** @var array<string, Route> */
     private array $namedRoutes = [];
 
-    /** @var array<string, Closure[]> */
+    /** @var array<string, array<int, Closure|string>> */
     private array $groupMiddleware = [];
 
     private string $currentGroupPrefix = '';
 
-    /** @var Closure[] */
+    /** @var array<int, Closure|string> */
     private array $currentGroupMiddleware = [];
 
     public function __construct(Application $app)
@@ -142,7 +142,8 @@ class Router
     /**
      * Create a route group with shared attributes
      *
-     * @param Closure[] $middleware
+     * The 'middleware' attribute takes closures or MiddlewareInterface
+     * class-strings, same as Route::middleware().
      */
     public function group(array $attributes, Closure $callback): void
     {
@@ -249,7 +250,7 @@ class Router
     private function runRoute(Route $route, Request $request): Response
     {
         $handler = $route->getHandler();
-        $middleware = $route->getMiddleware();
+        $middleware = array_map($this->app->resolveMiddleware(...), $route->getMiddleware());
 
         // Build middleware pipeline
         $pipeline = array_reduce(

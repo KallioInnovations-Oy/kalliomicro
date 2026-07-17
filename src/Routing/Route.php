@@ -27,7 +27,7 @@ class Route
     /** @var array<string, string> */
     private array $defaults = [];
 
-    /** @var Closure[] */
+    /** @var array<int, Closure|string> */
     private array $middleware = [];
 
     private ?string $name = null;
@@ -161,8 +161,14 @@ class Route
 
     /**
      * Add middleware to this route
+     *
+     * Accepts a Closure(Request, Closure): Response, or a class-string of a
+     * MiddlewareInterface implementation — resolved through the container at
+     * dispatch time, so constructor dependencies auto-wire. Parameterized
+     * middleware (variadic roles, custom $except lists) still use the closure
+     * form, since the container cannot guess those arguments.
      */
-    public function middleware(Closure $middleware): self
+    public function middleware(Closure|string $middleware): self
     {
         $this->middleware[] = $middleware;
         return $this;
@@ -260,7 +266,7 @@ class Route
     }
 
     /**
-     * @return Closure[]
+     * @return array<int, Closure|string>
      */
     public function getMiddleware(): array
     {

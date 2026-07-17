@@ -23,7 +23,7 @@ protected function validate(array $rules, array $messages = []): array
 - `$rules` — `field => 'rule1|rule2:param|…'` (pipe-delimited string) or `field => [rules]` array form.
 - A rule with parameters splits on the first `:`; the parameter list splits on commas — **except `regex`, which takes the whole remainder** so patterns may contain commas (`regex:/^[A-Z]{2,4}[0-9]+$/` works).
 - Values come from `$this->all()` (query + post). A field absent from the input validates as `null` — which passes every rule except `required`.
-- **Unknown rule names throw `InvalidArgumentException`** — a typo like `requird` fails loudly instead of silently passing.
+- **Unknown rule names throw `InvalidArgumentException`** — a typo like `requird` fails loudly instead of silently passing. The message lists the shipped rules and states that database-aware rules (`unique`/`exists`) are intentionally not part of the base.
 
 ### Return shape
 
@@ -73,4 +73,4 @@ Rationale: HTTP form input is always strings. Without the declared-rule check, `
 
 1. **First error per field only** — evaluation stops at the first failing rule; order rules accordingly (`required` first).
 2. **No database-aware rules** — uniqueness/existence checks belong in the controller and in schema constraints.
-3. Client side, `kalliomicro.js` performs only a required-fields pre-check; server `validation_errors` reach the client in `data.validation_errors` but are **not** rendered per-field by the stock client (only the message is flashed) — see [api-response.md](api-response.md).
+3. Client side, `kalliomicro.js` pre-checks `[required]` fields, and renders server `validation_errors` per-field (`is-invalid` + `.invalid-feedback`, cleared on next submit) — see [api-response.md](api-response.md).

@@ -420,6 +420,60 @@ class QueryBuilder
         return $this->offset(($page - 1) * $perPage)->limit($perPage);
     }
 
+    /**
+     * Execute the query for a page and return data plus pagination metadata.
+     *
+     * Rendering the page links is view-layer policy and stays downstream;
+     * this only owns the mechanism (count + page slice + metadata).
+     *
+     * @return array{data: array<int, array<string, mixed>>, total: int, per_page: int,
+     *               current_page: int, last_page: int, from: int|null, to: int|null}
+     */
+    public function paginate(int $page = 1, int $perPage = 15): array
+    {
+        if ($this->groupBy !== []) {
+            throw new RuntimeException(
+                'paginate() does not support groupBy() — the COUNT aggregate collapses the groups. '
+                . 'Compute the total yourself and use forPage().'
+            );
+        }
+
+        if ($this->distinct) {
+            throw new RuntimeException(
+                'paginate() does not support distinct() — DISTINCT is a no-op on the COUNT aggregate, '
+                . 'so the total would count duplicate rows. Compute the total yourself and use forPage().'
+            );
+        }
+
+        $page = max(1, $page);
+        $perPage = max(1, $perPage);
+        $offset = ($page - 1) * $perPage;
+
+        // Both queries run on clones: the count with ORDER BY / LIMIT / OFFSET
+        // stripped (they cannot change the total but produce slower — or, with
+        // LIMIT, wrong — counts), the data as a page slice. The builder itself
+        // is left untouched, so it stays reusable after paginate().
+        $countQuery = clone $this;
+        $countQuery->orderBy = [];
+        $countQuery->limitValue = null;
+        $countQuery->offsetValue = null;
+        $total = $countQuery->count();
+
+        // A page past the end is knowably empty — skip the offset scan.
+        $data = $offset < $total ? (clone $this)->forPage($page, $perPage)->get() : [];
+        $from = $data === [] ? null : $offset + 1;
+
+        return [
+            'data' => $data,
+            'total' => $total,
+            'per_page' => $perPage,
+            'current_page' => $page,
+            'last_page' => max(1, (int) ceil($total / $perPage)),
+            'from' => $from,
+            'to' => $from === null ? null : $from + count($data) - 1,
+        ];
+    }
+
     // Execution methods
 
     /**
@@ -852,6 +906,38 @@ class QueryBuilder
     public function clone(): self
     {
         return clone $this;
+    }
+
+    /**
+     * Fail loudly and helpfully on unknown methods — this builder is
+     * deliberately smaller than Laravel's; common Laravel calls get pointed
+     * at the local equivalent instead of a bare "undefined method".
+     *
+     * @param array<int, mixed> $arguments
+     */
+    public function __call(string $method, array $arguments): mixed
+    {
+        $hints = [
+            'find'           => "use first() with where('id', \$id)",
+            'firstOrFail'    => 'use first() and handle null in the caller',
+            'chunk'          => 'loop forPage($page, $size)->get() until it returns an empty array',
+            'with'           => 'no ORM/relations — use join() or a second query',
+            'whereHas'       => 'no ORM/relations — use join() or Connection::select() with raw SQL',
+            'insertGetId'    => 'insert() already returns the last insert id',
+            'updateOrInsert' => 'use upsert()',
+            'selectRaw'      => 'pass a RawExpression to select(), or use Connection::select() with bindings',
+            'orderByRaw'     => 'not supported — use Connection::select() with raw SQL',
+            'when'           => 'use a plain if around the chain',
+        ];
+
+        $hint = isset($hints[$method]) ? " Hint: {$hints[$method]}." : '';
+
+        throw new \BadMethodCallException(sprintf(
+            "Call to undefined method %s::%s().%s This is KallioMicro's QueryBuilder, not Laravel's — see docs/database.md for the shipped method list.",
+            static::class,
+            $method,
+            $hint
+        ));
     }
 }
 

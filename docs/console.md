@@ -53,12 +53,22 @@ Schedules are **code-defined and in-memory** — cron expressions registered aga
 $console->schedule('task:backup', '0 2 * * *');
 ```
 
+The same command may be scheduled multiple times with different expressions — every entry is kept and runs when due (each shows as its own row in `--list`).
+
 `schedule:run` is invoked by the host cron every minute:
 
 ```
 * * * * * php /path/to/console schedule:run
 ```
 
-Per tick it parses each task's 5-field cron expression (`min hour day month weekday`; supports `*`, exact values, `a-b` ranges, `a,b,c` lists, `*/n` and `a-b/n` steps — no named months/weekdays) and runs every due task **inline, sequentially**. `--list` prints a table with due-now status and next run; `--force` runs everything regardless. Exit `1` if any task failed.
+Per tick it parses each task's 5-field cron expression (`min hour day month weekday`; supports `*`, exact values, `a-b` ranges, `a,b,c` lists, `*/n` and `a-b/n` steps — no named months/weekdays) and runs every due task **inline, sequentially**. Anything outside that grammar — a zero step (`*/0`), a step on a list (`10,20/2`) — is **never due**: malformed fields silently don't match rather than crashing the tick. `--list` prints a table with due-now status and next run; `--force` runs everything regardless of schedule. Exit `1` if any task failed.
 
-> **Scope note — no overlap protection, by design.** The base scheduler assumes fast, idempotent tasks on a single host. If a task can run longer than its schedule interval, the next `schedule:run` tick starts a second concurrent instance — a deployment scheduling slow or non-idempotent work adds its own lock around task execution (e.g. MySQL `GET_LOCK` held by the DB connection, which auto-releases if the process dies).
+### Overlap protection
+
+Each task executes under a per-task non-blocking `flock` on `storage/framework/schedule-{sanitized-task}-{hash}.lock` (non-alphanumerics in the task name become `-`; an 8-char md5 suffix keeps sanitized collisions on distinct files — `task:backup` → `schedule-task-backup-a1b2c3d4.lock`):
+
+- A task still running from a previous tick is **skipped** (reported in the summary as skipped, not failed; exit code unaffected). `--force` bypasses the due-check but **never** the lock. **Operational note:** a task wedged forever (hung DB connection) is skipped on every tick with exit `0` — monitor the `Skipped:` count in the summary line, not only the exit code, if a task must not silently stall.
+- The kernel drops the lock automatically if the process dies — no stale-lock cleanup needed. Lock files are deliberately **never unlinked** (removing a file while another process holds its lock would let two holders "lock" different inodes of the same path); the persistent 0-byte files under `storage/framework/` are harmless.
+- If a lock directory/file cannot be created, **that task** is counted as failed (exit `1`) and the remaining due tasks still run — a permissions problem on one lock file never starves the whole scheduler. Running the scheduler as a different user than the one that created the lock files is the usual cause.
+
+> **Scope note — the lock is host-local, by design.** `flock` only serializes runs on one machine. A deployment invoking `schedule:run` on multiple hosts still needs a distributed lock inside the task (e.g. MySQL `GET_LOCK` held by the DB connection, which auto-releases if the process dies).

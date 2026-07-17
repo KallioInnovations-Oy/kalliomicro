@@ -36,7 +36,7 @@ public function delete(string $table, array $where): int
 ```
 
 - `upsert()` with empty `$updateColumns` updates **all** data columns on key collision (MySQL-specific).
-- ⚠ `update()`/`delete()` do not guard against an empty `$where` array (malformed SQL) — always pass at least one condition. (The QueryBuilder's `update()`/`delete()` have a hard guard; prefer them.)
+- `update()`/`delete()` throw `RuntimeException` on an empty `$where` array — a deliberate whole-table write goes through `query()` with explicit SQL. (The QueryBuilder's `update()`/`delete()` have the same guard.)
 
 ### Transactions
 
@@ -131,9 +131,18 @@ public function oldest(string $column = 'created_at'): self
 public function limit(int $limit): self        // alias take()
 public function offset(int $offset): self      // alias skip()
 public function forPage(int $page, int $perPage = 15): self
+public function paginate(int $page = 1, int $perPage = 15): array
 ```
 
-`forPage()` just sets offset + limit — there is no paginator object. For a total count, run `count()` on a `clone()` of the builder *before* pagination.
+`forPage()` just sets offset + limit. `paginate()` executes the query for one page and returns an array — there is no paginator object, and rendering page links is view-layer policy owned downstream:
+
+```php
+['data' => rows, 'total' => int, 'per_page' => int, 'current_page' => int,
+ 'last_page' => int, 'from' => int|null, 'to' => int|null]   // from/to null when the page is empty
+```
+
+- Both queries run on **clones** — the count with ORDER BY/LIMIT/OFFSET stripped (so `paginate()` after `orderBy()`/`limit()` still reports the full count), the data as a page slice — and **the builder itself is not mutated**: it stays reusable after `paginate()`. `$page`/`$perPage` clamp to ≥ 1; a page past the end returns empty `data` without executing the data query.
+- `paginate()` **throws** with `groupBy()` or `distinct()` (the COUNT aggregate collapses groups / ignores DISTINCT, so the total would be wrong — compute the total yourself and use `forPage()`).
 
 ### Execution and aggregates
 
@@ -173,6 +182,10 @@ public function toSql(): string
 public function getBindings(): array
 public function clone(): self
 ```
+
+### Unknown methods — the Laravel boundary
+
+Calling any method the builder doesn't ship throws `BadMethodCallException` with a self-describing message. Common Laravel methods (`find`, `firstOrFail`, `chunk`, `with`, `whereHas`, `insertGetId`, `updateOrInsert`, `selectRaw`, `orderByRaw`, `when`) get a hint naming the local equivalent; everything else points here. This is deliberate — the builder is "Laravel light", not Laravel; a missing Laravel method is a scope boundary, not a bug.
 
 ### RawExpression
 

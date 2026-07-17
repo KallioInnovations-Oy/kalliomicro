@@ -380,8 +380,12 @@ HTML;
 
     /**
      * Get HTTP status code for exception
+     *
+     * Static because it is the single owner of the exception→status contract:
+     * Application::handleException() maps through it too, so a web request
+     * and the registered global handler always agree on the status.
      */
-    public function getHttpCode(\Throwable $e): int
+    public static function getHttpCode(\Throwable $e): int
     {
         if ($e instanceof \KallioMicro\Http\HttpException) {
             return $e->getStatusCode();
