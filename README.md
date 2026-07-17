@@ -6,6 +6,8 @@ A modern, secure PHP 8+ MVC framework built with SOLID principles and minimal de
 
 The full framework specification lives in [docs/](docs/README.md) — verified against the source, covering the container and lifecycle, routing/middleware, the query builder, validation, auth/sessions, the ApiResponse action system with its JavaScript client contract, views, the console, and conventions. This README is the quick-start; the docs are the reference.
 
+Building a project on this base? Read the **base contract** in [docs/conventions.md](docs/conventions.md) first — it defines what a project copy owns, what stays read-only, and how to tell a framework bug from an intentional scope boundary.
+
 ## Features
 
 - **Security First**: CSRF protection, prepared statements, secure session handling
@@ -53,7 +55,8 @@ framework/
 ### 1. Installation
 
 ```bash
-composer install
+composer install            # development (includes PHPUnit; `composer test` runs the suite)
+composer install --no-dev   # production — runtime needs only PHP + PHPMailer
 cp .env.example .env
 # Edit .env with your database credentials
 ```
