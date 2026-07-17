@@ -25,7 +25,7 @@ Handlers: `[Controller::class, 'method']` (preferred), a `Closure`, or `'Control
 
 ### Groups
 
-`group(['prefix' => '/app', 'middleware' => […]], fn (Router $router) => …)` — prefixes concatenate and middleware arrays merge (parent first) across arbitrary nesting; state is saved/restored around the callback. **Every group must state its middleware array explicitly** — `/app` and `/api` groups require an auth guard (the shipped route files show the pattern with commented placeholders).
+`group(['prefix' => '/app', 'middleware' => […]], fn (Router $router) => …)` — prefixes concatenate and middleware arrays merge (parent first) across arbitrary nesting; state is saved/restored around the callback. **Every group must state its middleware array explicitly** — the shipped route files guard the `/app` group and the protected `/api` section with `AuthMiddleware::class` (401 JSON for `wantsJson()` requests, login redirect for web).
 
 ### Route parameters and constraints
 

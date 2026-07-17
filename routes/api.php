@@ -20,8 +20,9 @@ $router->group(['prefix' => '/api'], function (Router $router) {
             ->toResponse();
     });
 
-    // Protected API endpoints
-    $router->group(['middleware' => [/* ApiAuthMiddleware */]], function (Router $router) {
+    // Protected API endpoints — AuthMiddleware returns 401 JSON for
+    // wantsJson() requests instead of redirecting to the login page
+    $router->group(['middleware' => [KallioMicro\Middleware\AuthMiddleware::class]], function (Router $router) {
 
         // Example: Assessment API
         $router->get('/assessments', [App\Controllers\Api\AssessmentApiController::class, 'index']);

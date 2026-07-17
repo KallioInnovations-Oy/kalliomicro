@@ -21,7 +21,7 @@ $router->get('/auth/{provider}', [App\Controllers\AuthController::class, 'redire
 $router->get('/auth/{provider}/callback', [App\Controllers\AuthController::class, 'callback'])->name('auth.callback');
 
 // Protected routes
-$router->group(['prefix' => '/app', 'middleware' => [/* AuthMiddleware */]], function (Router $router) {
+$router->group(['prefix' => '/app', 'middleware' => [KallioMicro\Middleware\AuthMiddleware::class]], function (Router $router) {
     $router->get('/dashboard', [App\Controllers\DashboardController::class, 'index'])->name('dashboard');
 
     // Example CRUD resource
