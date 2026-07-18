@@ -81,13 +81,19 @@ $rows = $this->table('core_users')
 
 ### Identifier validation — the no-alias rule
 
-Columns passed to `select()`, `addSelect()`, join arguments, aggregates, `value()`, `pluck()`, and `increment()`/`decrement()` are checked against:
+Every column the builder accepts — `select()`, `addSelect()`, join arguments, aggregates, `value()`, `pluck()`, `increment()`/`decrement()`, and the whole `where` / `orWhere` / `whereIn` / `whereNotIn` / `whereNull` / `whereNotNull` / `whereBetween` / `groupBy` / `orderBy` family — is checked against:
 
 ```
 ^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*|\.\*)?$
 ```
 
-Allowed: `column`, `table.column`, `table.*`, bare `*`. **Rejected** (throws `InvalidArgumentException`): `AS` aliases, spaces, function calls, three-part names, hyphens. `RawExpression` instances pass through verbatim. Consequences: the builder cannot express aliases — self-joins and aliased selects use raw SQL via `Connection::select()` with explicit bindings. JOIN operators are allowlisted (`=`, `!=`, `<>`, `<`, `>`, `<=`, `>=`, `LIKE`). Never pass user input as a column name regardless — whitelist sortable columns in application code.
+Allowed: `column`, `table.column`, `table.*`, bare `*`. **Rejected** (throws `InvalidArgumentException`): `AS` aliases, spaces, function calls, three-part names, hyphens. `RawExpression` instances pass through verbatim. Consequences: the builder cannot express aliases — self-joins and aliased selects use raw SQL via `Connection::select()` with explicit bindings.
+
+Comparison operators are interpolated into the compiled SQL, so they are allowlisted too — `=`, `!=`, `<>`, `<`, `>`, `<=`, `>=`, `LIKE`, `NOT LIKE`, case-insensitively — in **both** `where()` and the JOIN methods. Anything else throws `InvalidArgumentException`.
+
+`Connection::quoteIdentifier()` fails closed: an identifier containing a backtick or a space raises rather than passing through unquoted. It is a quoting mechanism, not a validator — the shape check above is the actual defence, and both run.
+
+Never pass user input as a column name regardless — whitelist sortable columns in application code. The validator makes `?sort=<column>` non-injectable, not correct.
 
 ### Column selection & joins
 
@@ -116,9 +122,11 @@ public function whereRaw(string $sql, array $bindings = []): self
 
 - Two-argument shorthand: `where('active', 1)` means `active = 1`; `where('deleted_at', null)` compiles **`IS NULL`**.
 - Explicit null comparisons are normalized: `where('col', '=', null)` → `IS NULL`, `'!='`/`'<>'` → `IS NOT NULL`; any other operator with a null value throws (SQL `= NULL` never matches — the builder refuses to emit it).
-- `whereIn([])` compiles `0 = 1` (matches nothing); `whereNotIn([])` compiles `1 = 1` (matches everything) — no invalid `IN ()` SQL.
+- `whereIn([])` makes the **whole** query match nothing; `whereNotIn([])` compiles `1 = 1` (matches everything) — no invalid `IN ()` SQL. The empty-`IN` case collapses the entire WHERE clause to `0 = 1` rather than appending it, because AND binds tighter than OR: appended, `a = 1 OR b = 2 AND 0 = 1` reduces to `a = 1` and an empty permission allowlist would fail **open**.
 - `whereRaw()` requires the `?` placeholder count to equal `count($bindings)` (throws otherwise) and rewrites them into named bindings. The fragment text is the caller's responsibility; values always go through `$bindings`.
 - Chaining: only `orWhere()` produces `OR` — every other variant is `AND`; there is no grouped-parenthesis support (use `whereRaw()` for `(a OR b)` groups).
+
+⚠ **Mixed AND/OR chains are precedence-sensitive** (as of 2026-07-18). Conditions compile as a flat list, so `where('a')->orWhere('b')->where('c')` is `a OR (b AND c)`, not `(a OR b) AND c`. Grouping is not modelled. When a chain mixes both booleans and the grouping matters — authorization filters especially — use `whereRaw()` with explicit parentheses.
 
 ### Ordering, grouping, pagination
 
@@ -134,7 +142,7 @@ public function forPage(int $page, int $perPage = 15): self
 public function paginate(int $page = 1, int $perPage = 15): array
 ```
 
-`forPage()` just sets offset + limit. `paginate()` executes the query for one page and returns an array — there is no paginator object, and rendering page links is view-layer policy owned downstream:
+`forPage()` sets offset + limit, clamping `$page` and `$perPage` to at least 1 — it is normally fed straight from `?page=`, so `?page=0` is user input rather than a programming error. `limit()`/`offset()` reject negative values outright (that *is* a programming error), and an `offset()` with no `limit()` compiles a sentinel `LIMIT 18446744073709551615`, since MySQL has no bare `OFFSET`. `paginate()` executes the query for one page and returns an array — there is no paginator object, and rendering page links is view-layer policy owned downstream:
 
 ```php
 ['data' => rows, 'total' => int, 'per_page' => int, 'current_page' => int,
@@ -196,6 +204,6 @@ Calling any method the builder doesn't ship throws `BadMethodCallException` with
 ## Security model summary
 
 1. All values reach SQL through native prepared statements — the builder auto-binds everything.
-2. Identifiers are allowlist-validated at acceptance and backtick-quoted at compile.
+2. Identifiers are allowlist-validated at acceptance and backtick-quoted at compile — every accepting method, including the whole `where`/`orderBy`/`groupBy` family. Quoting fails closed on anything it cannot quote. Operators are allowlisted wherever they are interpolated.
 3. `whereRaw()` is the only escape hatch and enforces placeholder/binding parity.
 4. Destructive writes require an explicit WHERE.

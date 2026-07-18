@@ -21,6 +21,8 @@ Constructed by the Application as a singleton (alias `'view'`) with `resources/v
 
 `render()` starts each page with a **clean sections slate** (a previous render's captured sections never leak into the next), merges shared data under the call data (call data wins), runs registered composers, renders the template, and — if the template called `extends()` — renders the layout with the child's *direct* output injected as `$content`.
 
+**View data cannot collide with the engine's own locals.** Data is extracted with `EXTR_SKIP`, so the keys `__path`, `__data`, `view` and `this` are unavailable to templates — they are silently dropped rather than overwriting engine state. This is a security boundary, not a style rule: under the default `EXTR_OVERWRITE` a data key named `__path` replaced the template path the engine was about to `include`, which is arbitrary file inclusion for any project that flattens request input into view data (the natural "repopulate the form" pattern). Pass such a value under any other name.
+
 **Layouts must emit the body via `$view->yield('content', $content ?? '')`, never bare `$content`.** A section-based page captures its entire body into the `content` section, leaving the direct output (and therefore `$content`) empty — a layout echoing bare `$content` renders section-based pages blank. The `$content` argument is only the fallback for templates that emit output without sections:
 
 ```php

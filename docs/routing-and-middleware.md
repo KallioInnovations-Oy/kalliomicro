@@ -52,7 +52,7 @@ Contract: `KallioMicro\Middleware\MiddlewareInterface::handle(Request $request, 
 
 Two tiers:
 
-- **Global middleware** — registered with `Application::middleware()` in `public/index.php`; run for every request, outermost-first in registration order. The shipped global middleware starts the session.
+- **Global middleware** — registered with `Application::middleware()` in `public/index.php`; run for every request, outermost-first in registration order. The shipped global middleware starts the session. **Error responses go through the stack too**: a route handler that throws has its exception rendered at the destination, so the resulting 404/403/500 still travels back out through every global middleware. Security headers set here therefore survive on error responses. The one unavoidable exception is a middleware that throws *before* calling `$next` — nothing can run the pipeline on its behalf.
 - **Route middleware** — attached to routes/groups via `Route::middleware()` or the group `middleware` array.
 
 Both tiers accept a **closure** (`Closure(Request, Closure): Response`) or a **class-string** of a `MiddlewareInterface` implementation. Class-strings are resolved through the container at dispatch time, so constructor dependencies auto-wire:
@@ -153,7 +153,7 @@ protected function table(string $table): QueryBuilder
 
 **Every state-changing method (store/update/destroy) calls `$this->requireCsrf()` as its first line.** It throws `RuntimeException('CSRF token mismatch', 403)`, which the exception handler renders as a proper 403. An empty `csrf_token` field never shadows the `X-CSRF-Token` header (both `verifyCsrf()` and `CsrfMiddleware` fall through on null *or* empty).
 
-`back()` is same-origin safe: a cross-origin `Referer` host falls back to `/`, and a same-origin (or relative) referer is reduced to path + query via `Session::sanitizeRelativeUrl()` before redirecting. Missing `Referer` (or missing `Host` header) → `/`; bracketed IPv6 hosts compare correctly. The comparison uses the `Host` header the backend sees — behind a proxy that rewrites `Host`, same-origin referers are treated as cross-origin (configure `proxy_set_header Host $host` or accept the `/` fallback).
+`back()` is same-origin safe: a cross-origin `Referer` host falls back to `/`, and a same-origin (or relative) referer is reduced to path + query via `Session::sanitizeRelativeUrl()` before redirecting. The sanitizer applies its protocol-relative, backslash and control-character guards *after* reducing an absolute URL, because `parse_url()` can itself yield a protocol-relative path — `https://victimhost//evil.example/x` passes a naive same-origin check and used to reduce to `//evil.example/x`. Missing `Referer` (or missing `Host` header) → `/`; bracketed IPv6 hosts compare correctly. The comparison uses the `Host` header the backend sees — behind a proxy that rewrites `Host`, same-origin referers are treated as cross-origin (configure `proxy_set_header Host $host` or accept the `/` fallback).
 
 There are **no** `can()` / `hasRole()` / `authorize()` helpers on the controller — role checks go through the session user (`$this->user()['roles']`) or route-level `RoleMiddleware`; permission systems are a downstream concern.
 

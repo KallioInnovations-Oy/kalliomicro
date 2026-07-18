@@ -201,16 +201,22 @@ class ViewEngine
      */
     private function renderFile(string $__path, array $__data): string
     {
-        // Extract data to local scope
-        extract($__data);
+        // Extract data to local scope. EXTR_SKIP is required, not cosmetic:
+        // the default EXTR_OVERWRITE lets a data key named '__path' replace the
+        // include target below with an arbitrary file. Since $__path/$__data
+        // are parameters they already exist, so EXTR_SKIP leaves them intact
+        // and those two key names are silently unavailable to templates.
+        extract($__data, EXTR_SKIP);
 
-        // Make view engine available in templates
+        // Make view engine available in templates (after extract — not clobberable)
         $view = $this;
 
         ob_start();
 
         try {
-            include $__path;
+            // func_get_arg() re-reads the original argument rather than the
+            // local, so the include target holds even if the guard above moves.
+            include func_get_arg(0);
         } catch (\Throwable $e) {
             ob_end_clean();
             throw $e;

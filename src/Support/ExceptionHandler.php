@@ -130,14 +130,19 @@ class ExceptionHandler
 
     /**
      * Render an exception to a Response
+     *
+     * @param bool|null $asJson Force the representation. Null sniffs $_SERVER,
+     *                          which is right for the global handler; callers
+     *                          holding a Request pass $request->expectsJson()
+     *                          so a synthesized request is honoured too.
      */
-    public function render(\Throwable $e): Response
+    public function render(\Throwable $e, ?bool $asJson = null): Response
     {
         if ($this->customRenderer !== null) {
             return ($this->customRenderer)($e, $this);
         }
 
-        if ($this->wantsJson()) {
+        if ($asJson ?? $this->wantsJson()) {
             return $this->createJsonResponse($e);
         }
 

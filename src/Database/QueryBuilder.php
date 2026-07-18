@@ -15,6 +15,14 @@ use RuntimeException;
  */
 class QueryBuilder
 {
+    /**
+     * Operators that may be interpolated into compiled SQL
+     *
+     * Shared by JOIN and WHERE — both interpolate the operator verbatim, so
+     * both must validate it.
+     */
+    private const COMPARISON_OPERATORS = ['=', '!=', '<>', '<', '>', '<=', '>=', 'LIKE', 'NOT LIKE'];
+
     private Connection $connection;
     private string $table;
 
@@ -119,7 +127,7 @@ class QueryBuilder
 
     private function addJoin(string $type, string $table, string $first, string $operator, string $second): self
     {
-        if (!in_array(strtoupper($operator), ['=', '!=', '<>', '<', '>', '<=', '>=', 'LIKE'], true)) {
+        if (!in_array(strtoupper($operator), self::COMPARISON_OPERATORS, true)) {
             throw new InvalidArgumentException("Invalid JOIN operator: {$operator}");
         }
 
@@ -172,7 +180,7 @@ class QueryBuilder
     {
         $this->wheres[] = [
             'type' => 'null',
-            'column' => $column,
+            'column' => $this->validateIdentifier($column),
             'operator' => 'IS',
             'value' => null,
             'boolean' => 'AND',
@@ -187,7 +195,7 @@ class QueryBuilder
     {
         $this->wheres[] = [
             'type' => 'notNull',
-            'column' => $column,
+            'column' => $this->validateIdentifier($column),
             'operator' => 'IS NOT',
             'value' => null,
             'boolean' => 'AND',
@@ -205,7 +213,7 @@ class QueryBuilder
 
         $this->wheres[] = [
             'type' => 'between',
-            'column' => $column,
+            'column' => $this->validateIdentifier($column),
             'operator' => 'BETWEEN',
             'value' => [$minKey, $maxKey],
             'boolean' => 'AND',
@@ -277,8 +285,8 @@ class QueryBuilder
 
         $this->wheres[] = [
             'type' => $type,
-            'column' => $column,
-            'operator' => $operatorOrValue,
+            'column' => $this->validateIdentifier($column),
+            'operator' => $this->validateOperator((string) $operatorOrValue),
             'value' => $bindingKey,
             'boolean' => $boolean,
         ];
@@ -290,7 +298,7 @@ class QueryBuilder
     {
         $this->wheres[] = [
             'type' => $not ? 'notNull' : 'null',
-            'column' => $column,
+            'column' => $this->validateIdentifier($column),
             'operator' => $not ? 'IS NOT' : 'IS',
             'value' => null,
             'boolean' => $boolean,
@@ -300,10 +308,20 @@ class QueryBuilder
 
     private function addWhereIn(string $column, array $values, string $boolean, bool $not): self
     {
+        $column = $this->validateIdentifier($column);
+
         if ($values === []) {
-            // IN () is invalid SQL. An empty IN list matches nothing; an empty NOT IN list matches everything.
+            // IN () is invalid SQL. An empty IN list matches nothing; an empty
+            // NOT IN list matches everything.
+            //
+            // 'alwaysFalse' is absorbing when joined with AND, and compileWheres()
+            // collapses the whole clause to it. Merely appending "0 = 1" is not
+            // enough — AND binds tighter than OR, so "a = 1 OR b = 2 AND 0 = 1"
+            // reduces to "a = 1" and an empty permission allowlist fails OPEN.
+            // Parenthesising the fragment does not help either; the grouping has
+            // to swallow the preceding conditions, not itself.
             $this->wheres[] = [
-                'type' => 'raw',
+                'type' => $not ? 'alwaysTrue' : 'alwaysFalse',
                 'column' => $not ? '1 = 1' : '0 = 1',
                 'operator' => '',
                 'value' => null,
@@ -333,7 +351,10 @@ class QueryBuilder
      */
     public function groupBy(string ...$columns): self
     {
-        $this->groupBy = array_merge($this->groupBy, $columns);
+        $this->groupBy = array_merge(
+            $this->groupBy,
+            array_map(fn (string $column): string => $this->validateIdentifier($column), $columns)
+        );
         return $this;
     }
 
@@ -348,7 +369,7 @@ class QueryBuilder
         }
 
         $this->orderBy[] = [
-            'column' => $column,
+            'column' => $this->validateIdentifier($column),
             'direction' => $direction,
         ];
         return $this;
@@ -383,6 +404,10 @@ class QueryBuilder
      */
     public function limit(int $limit): self
     {
+        if ($limit < 0) {
+            throw new InvalidArgumentException("LIMIT cannot be negative: {$limit}");
+        }
+
         $this->limitValue = $limit;
         return $this;
     }
@@ -400,6 +425,10 @@ class QueryBuilder
      */
     public function offset(int $offset): self
     {
+        if ($offset < 0) {
+            throw new InvalidArgumentException("OFFSET cannot be negative: {$offset}");
+        }
+
         $this->offsetValue = $offset;
         return $this;
     }
@@ -417,6 +446,12 @@ class QueryBuilder
      */
     public function forPage(int $page, int $perPage = 15): self
     {
+        // Clamped, not validated: forPage() is fed straight from ?page= in the
+        // ordinary controller pattern, so page 0 or -3 is user input rather
+        // than a programming error. paginate() clamps identically.
+        $page = max(1, $page);
+        $perPage = max(1, $perPage);
+
         return $this->offset(($page - 1) * $perPage)->limit($perPage);
     }
 
@@ -756,6 +791,14 @@ class QueryBuilder
             return '';
         }
 
+        // An AND-joined always-false condition absorbs every other condition,
+        // so it replaces the clause outright rather than being appended to it.
+        foreach ($this->wheres as $where) {
+            if ($where['type'] === 'alwaysFalse' && $where['boolean'] === 'AND') {
+                return ' WHERE 0 = 1';
+            }
+        }
+
         $parts = [];
         foreach ($this->wheres as $i => $where) {
             $clause = '';
@@ -804,6 +847,8 @@ class QueryBuilder
                     break;
 
                 case 'raw':
+                case 'alwaysTrue':
+                case 'alwaysFalse':
                     $clause .= $where['column'];
                     break;
             }
@@ -843,7 +888,9 @@ class QueryBuilder
     private function compileLimit(): string
     {
         if ($this->limitValue === null) {
-            return '';
+            // MySQL has no bare OFFSET; the documented idiom for "skip n, take
+            // everything" is a LIMIT of the maximum unsigned BIGINT.
+            return $this->offsetValue === null ? '' : ' LIMIT 18446744073709551615';
         }
         return ' LIMIT ' . $this->limitValue;
     }
@@ -877,6 +924,24 @@ class QueryBuilder
      * Aliases (AS), functions, and cross-database references are rejected —
      * use Connection raw queries with bindings for those.
      */
+    /**
+     * Validate a comparison operator against the allowlist
+     *
+     * Operators are interpolated into the compiled SQL, so an unvalidated one
+     * is an injection sink in its own right — '= 1 OR 1=1 AND a =' would ride
+     * in alongside a correctly quoted column.
+     */
+    private function validateOperator(string $operator): string
+    {
+        $normalized = strtoupper(trim($operator));
+
+        if (!in_array($normalized, self::COMPARISON_OPERATORS, true)) {
+            throw new InvalidArgumentException("Invalid operator: {$operator}");
+        }
+
+        return $normalized;
+    }
+
     private function validateIdentifier(string $identifier): string
     {
         if ($identifier === '*') {
@@ -938,22 +1003,5 @@ class QueryBuilder
             $method,
             $hint
         ));
-    }
-}
-
-/**
- * RawExpression - Represents a raw SQL expression
- *
- * Used to insert raw SQL into queries without escaping.
- */
-class RawExpression
-{
-    public function __construct(
-        public readonly string $expression
-    ) {}
-
-    public function __toString(): string
-    {
-        return $this->expression;
     }
 }

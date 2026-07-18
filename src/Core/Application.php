@@ -6,8 +6,10 @@ namespace KallioMicro\Core;
 
 use KallioMicro\Core\Container;
 use KallioMicro\Core\Config;
+use KallioMicro\Http\HttpException;
 use KallioMicro\Http\Request;
 use KallioMicro\Http\Response;
+use KallioMicro\Support\ExceptionHandler;
 use KallioMicro\Routing\Router;
 use KallioMicro\Database\Connection;
 use KallioMicro\View\ViewEngine;
@@ -178,6 +180,17 @@ class Application extends Container
             $callback($this);
         }
 
+        // Default error renderer, registered only if nothing else claimed the
+        // binding — a boot callback that binds its own (custom renderer, hidden
+        // paths, a logger) wins. Autowiring would otherwise construct one with
+        // the constructor's debug=false and never show a debug page.
+        if (!$this->has(ExceptionHandler::class)) {
+            $this->singleton(ExceptionHandler::class, function (): ExceptionHandler {
+                $debug = (bool) $this->make(Config::class)->get('app.debug', false);
+                return new ExceptionHandler(debug: $debug);
+            });
+        }
+
         $this->booted = true;
     }
 
@@ -189,13 +202,21 @@ class Application extends Container
         try {
             $this->boot();
 
-            // Run through middleware stack
-            $response = $this->runMiddleware($request, function (Request $request) {
-                return $this->dispatchToRouter($request);
+            // The destination catches its own exceptions so the error response
+            // travels back out through the global middleware stack. Built
+            // outside it, error responses silently lose whatever global
+            // middleware adds — security headers being the usual casualty, on
+            // exactly the responses an attacker is most likely to provoke.
+            return $this->runMiddleware($request, function (Request $request) {
+                try {
+                    return $this->dispatchToRouter($request);
+                } catch (Throwable $e) {
+                    return $this->handleException($e, $request);
+                }
             });
-
-            return $response;
         } catch (Throwable $e) {
+            // Last resort: boot() failed, or a middleware threw before calling
+            // $next. Nothing can run the pipeline for us here.
             return $this->handleException($e, $request);
         }
     }
@@ -252,32 +273,32 @@ class Application extends Container
         return $router->dispatch($request);
     }
 
+    /**
+     * Render a thrown exception to a Response
+     *
+     * Delegates to ExceptionHandler, which is the single owner of error
+     * rendering: it escapes the debug page, strips `args` from the trace, and
+     * gates every message on debug alone. This method previously carried a
+     * second, weaker copy of that logic — unescaped HTML, a raw trace on the
+     * JSON path, and a `$status < 500` branch that leaked internal exception
+     * messages to clients in production.
+     *
+     * ExceptionHandler is resolved from the container so a downstream project
+     * can swap or configure it (custom renderer, hidden paths) via instance().
+     */
     private function handleException(Throwable $e, Request $request): Response
     {
-        $config = $this->make(Config::class);
-        $debug = $config->get('app.debug', false);
+        $handler = $this->make(ExceptionHandler::class);
 
         // requireCsrf() (403), HttpException::notFound() (404), etc. must
         // surface at their declared status — a blanket 500 breaks the
         // documented "abort with a specific HTTP status from anywhere" path.
-        $status = \KallioMicro\Support\ExceptionHandler::getHttpCode($e);
-        $headers = $e instanceof \KallioMicro\Http\HttpException ? $e->getHeaders() : [];
+        $response = $handler->render($e, $request->expectsJson());
 
-        if ($request->expectsJson()) {
-            $response = Response::json([
-                'error' => true,
-                'message' => $debug || $status < 500 ? $e->getMessage() : 'Internal Server Error',
-                'trace' => $debug ? $e->getTrace() : null,
-            ], $status);
-        } else {
-            $response = Response::html('', $status);
-            $response->content($debug
-                ? sprintf('<h1>Error</h1><pre>%s</pre><pre>%s</pre>', $e->getMessage(), $e->getTraceAsString())
-                : sprintf('<h1>%d - %s</h1>', $status, $response->getStatusText()));
-        }
-
-        foreach ($headers as $name => $value) {
-            $response->header($name, $value);
+        if ($e instanceof HttpException) {
+            foreach ($e->getHeaders() as $name => $value) {
+                $response->header($name, $value);
+            }
         }
 
         return $response;

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KallioMicro\Database;
 
+use InvalidArgumentException;
 use PDO;
 use PDOException;
 use PDOStatement;
@@ -363,20 +364,37 @@ class Connection
 
     /**
      * Quote an identifier (table/column name)
+     *
+     * This is a quoting mechanism, not a validator — callers still validate
+     * shape first (QueryBuilder::validateIdentifier()). It fails closed: an
+     * identifier it cannot safely quote raises rather than passing through.
+     *
+     * @throws InvalidArgumentException when the identifier cannot be quoted
      */
     public function quoteIdentifier(string $identifier): string
     {
-        // Handle table.column notation
+        // The wildcard is not an identifier and must not be backticked —
+        // `*` means a column literally named '*' and is never what was meant.
+        if ($identifier === '*') {
+            return '*';
+        }
+
+        // Handle table.column notation (including table.*)
         if (str_contains($identifier, '.')) {
             return implode('.', array_map([$this, 'quoteIdentifier'], explode('.', $identifier)));
         }
 
-        // Don't quote if it's already quoted or contains special characters (like aliases)
+        // Previously these were returned unquoted AND unescaped to accommodate
+        // aliases, which made the method an injection passthrough for exactly
+        // the inputs that matter. Aliases belong in a RawExpression.
         if (str_contains($identifier, '`') || str_contains($identifier, ' ')) {
-            return $identifier;
+            throw new InvalidArgumentException(
+                "Cannot quote identifier containing a backtick or space: {$identifier}. "
+                . 'Use RawExpression for aliases and expressions.'
+            );
         }
 
-        return '`' . str_replace('`', '``', $identifier) . '`';
+        return '`' . $identifier . '`';
     }
 
     /**

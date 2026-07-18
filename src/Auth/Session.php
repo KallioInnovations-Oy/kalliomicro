@@ -460,12 +460,10 @@ class Session
      */
     public static function sanitizeRelativeUrl(string $url): string
     {
-        // Protocol-relative (//evil.com) — no salvageable path
-        if (str_starts_with($url, '//')) {
-            return '/';
-        }
-
-        // Absolute URL (scheme:...) — keep only path + query
+        // Absolute URL (scheme:...) — keep only path + query. This runs FIRST
+        // so every guard below inspects the final value: parse_url() on
+        // 'https://host//evil.com/x' yields '//evil.com/x', so a guard applied
+        // only to the input would be bypassed by the reduction.
         if (preg_match('#^[a-z][a-z0-9+.\-]*:#i', $url)) {
             $path = parse_url($url, PHP_URL_PATH);
             $query = parse_url($url, PHP_URL_QUERY);
@@ -473,8 +471,18 @@ class Session
                 . (is_string($query) && $query !== '' ? "?{$query}" : '');
         }
 
-        // Backslash tricks (/\evil.com) — some browsers treat \ as /
-        if (str_starts_with($url, '/\\') || str_starts_with($url, '\\')) {
+        // Control characters — CR/LF would split a Location header, NUL truncates
+        if (preg_match('/[\x00-\x1F\x7F]/', $url)) {
+            return '/';
+        }
+
+        // Any two leading slashes are protocol-relative (//evil.com), and
+        // browsers normalize \ to /, so /\, \/ and \\ are equivalent tricks.
+        if (preg_match('#^[/\\\\]{2}#', $url)) {
+            return '/';
+        }
+
+        if (str_starts_with($url, '\\')) {
             return '/';
         }
 

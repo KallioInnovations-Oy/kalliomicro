@@ -75,11 +75,18 @@ class GoogleAuthProvider implements OAuthProviderInterface
 
     public function handleCallback(array $params): AuthResult
     {
-        // Verify state
-        $state = $params['state'] ?? '';
-        $expectedState = $_SESSION['_oauth_state'] ?? '';
+        // Verify state. The expected value is consumed up front — before the
+        // comparison and regardless of outcome — so a state is single-use and
+        // survives no failed attempt.
+        $state = is_string($params['state'] ?? null) ? $params['state'] : '';
+        $expectedState = is_string($_SESSION['_oauth_state'] ?? null) ? $_SESSION['_oauth_state'] : '';
+        unset($_SESSION['_oauth_state']);
 
-        if (!hash_equals($expectedState, $state)) {
+        // Both sides must be non-empty: hash_equals('', '') is true, so a
+        // victim who never started a flow has no _oauth_state and a callback
+        // carrying an empty state would otherwise pass — login CSRF, which
+        // logs the victim's browser into the attacker's account.
+        if ($expectedState === '' || $state === '' || !hash_equals($expectedState, $state)) {
             return AuthResult::failure('Invalid state parameter');
         }
 
@@ -95,8 +102,11 @@ class GoogleAuthProvider implements OAuthProviderInterface
             return AuthResult::failure('No authorization code received');
         }
 
+        // An error response from the token endpoint still decodes to an array,
+        // so a null check alone lets a token-less payload through to a
+        // string-typed getUserInfo() and turns a failed login into a TypeError.
         $tokens = $this->exchangeCodeForTokens($code);
-        if ($tokens === null) {
+        if ($tokens === null || !is_string($tokens['access_token'] ?? null)) {
             return AuthResult::failure('Failed to exchange code for tokens');
         }
 
@@ -113,9 +123,6 @@ class GoogleAuthProvider implements OAuthProviderInterface
                 return AuthResult::failure('Invalid email domain');
             }
         }
-
-        // Clean up session
-        unset($_SESSION['_oauth_state']);
 
         // Map to user array
         $user = $this->mapUserInfo($userInfo, $tokens);
