@@ -33,6 +33,8 @@ Constructed by the Application as a singleton (alias `'view'`) with `resources/v
 
 A template that throws is unwound cleanly: the engine closes every buffer the aborted render opened (its own and any still-open `section()`), so a half-rendered page is never flushed ahead of the error page.
 
+**`partial()` rejects a template that calls `extends()`.** Rendering without layout handling means a template that captures its body into sections has nowhere to put it — the call returns an empty string and the content silently disappears. So `partial()`, `include()`, `component()` and `Controller::renderPartial()` / `renderToResponse()` throw a `RuntimeException` naming the template and the layout it asked for. Drop the `extends()`/`section()` calls to make it a real partial, or render it with `render()` as a page. (A partial that calls `section()` *without* `extends()` is fine and still works — that is how a partial contributes to a parent page's `scripts` section.)
+
 Other mechanics: `partial($template, $data)` / `include()` render without layout handling; `component($name, $data, $slot)` renders `components/{name}` with `$slot` available (⚠ no `components/` directory ships in the base — the mechanism exists for downstream component libraries); `exists($template)` checks resolvability — a **readable file**, so a directory whose name matches a view (`resources/views/assessments`) is not a template; `composer($pattern, $callback)` registers pre-render data callbacks (exact or `*` wildcard match).
 
 ### Escaping — the XSS rules

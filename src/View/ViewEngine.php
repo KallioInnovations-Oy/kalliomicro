@@ -110,7 +110,30 @@ class ViewEngine
         $path = $this->resolvePath($template);
         $data = array_merge($this->shared, $data);
 
-        return $this->renderFile($path, $data);
+        // Snapshot rather than test absolutely: a partial rendered from inside
+        // a page would otherwise see the PAGE's layout and report it as its own.
+        $layoutBefore = $this->currentLayout;
+
+        $content = $this->renderFile($path, $data);
+
+        if ($this->currentLayout !== $layoutBefore && $this->currentLayout !== null) {
+            $declared = $this->currentLayout;
+
+            // Don't leave the parent render wrapped in a layout it never asked for
+            $this->currentLayout = $layoutBefore;
+
+            throw new RuntimeException(sprintf(
+                'View [%s] calls extends(\'%s\') but was rendered as a partial. '
+                . 'partial() does no layout handling, so a template that captures '
+                . 'its body into sections returns an empty string and the content '
+                . 'silently disappears. Drop the extends()/section() calls to make '
+                . 'it a real partial, or render it with render() as a full page.',
+                $template,
+                $declared
+            ));
+        }
+
+        return $content;
     }
 
     /**

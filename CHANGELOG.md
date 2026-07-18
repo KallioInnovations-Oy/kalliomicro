@@ -7,6 +7,43 @@ newer base.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.3] – 2026-07-18
+
+Two silent no-ops, both the same shape as the dead code removed in 1.2.2:
+something that looks like it is configured or rendering, and isn't.
+
+### Changed
+
+- **`partial()` rejects a template that calls `extends()`.** Rendering without
+  layout handling means a template that captures its body into sections has
+  nowhere to put it: the call returned an **empty string** and the content
+  disappeared without a word. 1.2.0 stopped such a template injecting a whole
+  `<!DOCTYPE html>` document into a modal, but the replacement outcome was no
+  better — silently blank. `partial()`, `include()`, `component()` and
+  `Controller::renderPartial()` / `renderToResponse()` now throw a
+  `RuntimeException` naming the template and the layout it asked for, and the
+  engine's layout state is restored so the *next* render is unaffected.
+
+  A partial calling `section()` **without** `extends()` still works — that is
+  how a partial contributes to a parent page's `scripts` section, and no
+  shipped view relies on the rejected combination.
+
+- **`config('app.timezone')` is applied.** It has shipped in `config/app.php`
+  since the beginning and nothing ever read it, so `date()` and `DateTime` ran
+  on whatever php.ini said while the config file claimed `Europe/Helsinki`.
+  `Application::boot()` now calls `date_default_timezone_set()`. An unknown
+  identifier throws rather than falling back, because the failure being
+  prevented is an entire application quietly keeping the wrong clock — the same
+  hazard as the unasserted session time zone documented in `database.md`.
+
+  **Check this on upgrade:** if you were relying on the php.ini default, your
+  application clock moves to `Europe/Helsinki` unless you set `app.timezone`
+  yourself. Set it to `UTC` to line timestamps up with `UTC_TIMESTAMP()`.
+
+`app.name` and `app.env` remain application-only keys — documented as such,
+since `config/` is downstream-editable territory and both are conventional for
+application code to read.
+
 ## [1.2.2] – 2026-07-18
 
 Removes dead code from `src/`. Standing rule, recorded here because it governs

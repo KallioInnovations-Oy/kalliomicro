@@ -2,7 +2,7 @@
 
 > Sources: `src/Core/`, `src/Support/`, `public/index.php`, `console`, `config/`, `composer.json`.
 
-KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.2'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
+KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.3'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
 
 ## Design philosophy
 
@@ -70,6 +70,8 @@ Two layers, with a hard rule between them:
 2. **`config/*.php` → `config()`** — `KallioMicro\Core\Config` eagerly `require`s every `config/*.php`; the file basename is the top-level key and dot notation reads into it (`config('app.debug')`). Also implements `ArrayAccess`.
 
 **Rule: `env()` may only be called inside `config/*.php`** (exception: entry-script crash handlers, where config may not be loadable). Application code reads `config()`.
+
+**`app.timezone` is applied by `Application::boot()`** via `date_default_timezone_set()`, so `date()` and `DateTime` follow it rather than php.ini. An unknown identifier throws instead of falling back — a whole application quietly running on the wrong clock is the failure being prevented. Set it to `UTC` if you want timestamps to match `UTC_TIMESTAMP()` (see the server-expectations note in [database.md](database.md)). `app.name` and `app.env` are read by **application** code only; the framework does not consume them.
 
 Config files shipped: `app` (name, env, debug, url, timezone `Europe/Helsinki`, locale), `auth` (default provider + `local`/`entra`/`ldap`/`google` provider config), `database` (default + connections), `session` (cookie, lifetime, secure, http_only, same_site, domain, regenerate_interval). Add new config surfaces as new files in `config/`.
 

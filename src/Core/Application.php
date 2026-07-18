@@ -26,7 +26,7 @@ use Throwable;
  */
 class Application extends Container
 {
-    private const VERSION = '1.2.2';
+    private const VERSION = '1.2.3';
 
     private static ?Application $instance = null;
 
@@ -177,6 +177,8 @@ class Application extends Container
             $callback($this);
         }
 
+        $this->applyTimezone();
+
         // Default error renderer, registered only if nothing else claimed the
         // binding — a boot callback that binds its own (custom renderer, hidden
         // paths, a logger) wins. Autowiring would otherwise construct one with
@@ -189,6 +191,38 @@ class Application extends Container
         }
 
         $this->booted = true;
+    }
+
+    /**
+     * Apply config('app.timezone') to PHP's default timezone
+     *
+     * `app.timezone` shipped in config/app.php from the start and nothing ever
+     * read it — every date() call in every downstream silently used whatever
+     * php.ini said instead. A config key that does nothing is worse than an
+     * absent one: it reads as a setting that has been made.
+     *
+     * An unknown identifier raises rather than falling back, because the
+     * failure it prevents is a whole application quietly running on the wrong
+     * clock — the same hazard as the unasserted session time zone in
+     * docs/database.md.
+     */
+    private function applyTimezone(): void
+    {
+        $timezone = $this->make(Config::class)->get('app.timezone');
+
+        if ($timezone === null || $timezone === '') {
+            return;
+        }
+
+        if (!is_string($timezone) || !in_array($timezone, timezone_identifiers_list(), true)) {
+            throw new \InvalidArgumentException(sprintf(
+                'config(\'app.timezone\') must be a valid timezone identifier, %s given. '
+                . 'Use an IANA name such as "Europe/Helsinki" or "UTC".',
+                is_string($timezone) ? "'{$timezone}'" : get_debug_type($timezone)
+            ));
+        }
+
+        date_default_timezone_set($timezone);
     }
 
     /**

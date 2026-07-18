@@ -67,11 +67,30 @@ class ControllerRenderPartialTest extends TestCase
         };
     }
 
-    public function testRenderPartialDoesNotApplyTheTemplatesLayout(): void
+    /**
+     * Rendering a page template as a partial used to inject the whole
+     * <!DOCTYPE html> document into the modal body; 1.2.0 stopped that, but the
+     * result was then an empty string — the body silently disappeared. Neither
+     * is a usable outcome, so it now says so.
+     */
+    public function testRenderPartialRejectsATemplateThatExtendsALayout(): void
     {
-        $content = $this->controller()->runRenderPartial('modal');
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage("View [modal] calls extends('layouts.app')");
 
-        $this->assertStringNotContainsString('<!DOCTYPE html>', $content, 'a whole page document was injected into the modal body');
+        $this->controller()->runRenderPartial('modal');
+    }
+
+    public function testAFailedPartialDoesNotLeaveItsLayoutOnTheEngine(): void
+    {
+        try {
+            $this->controller()->runRenderPartial('modal');
+        } catch (\RuntimeException) {
+            // expected
+        }
+
+        // The next render must not inherit the rejected partial's layout.
+        $this->assertSame('&lt;b&gt;', $this->controller()->runRenderPartial('rows', ['label' => '<b>']));
     }
 
     public function testRenderPartialStillRendersOrdinaryPartials(): void
@@ -86,8 +105,12 @@ class ControllerRenderPartialTest extends TestCase
      */
     public function testRenderToResponseDoesNotApplyTheTemplatesLayout(): void
     {
-        $layoutUser = json_encode($this->controller()->runRenderToResponse('modal', '#target')->getActions());
-        $this->assertStringNotContainsString('DOCTYPE', (string) $layoutUser, 'a whole page document was injected into a DOM target');
+        try {
+            $this->controller()->runRenderToResponse('modal', '#target');
+            $this->fail('a page template rendered into a DOM target should be rejected');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('rendered as a partial', $e->getMessage());
+        }
 
         // An ordinary partial — the shape this method is actually for —
         // still reaches the target intact.
