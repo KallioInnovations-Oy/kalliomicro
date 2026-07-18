@@ -2,7 +2,7 @@
 
 > Sources: `src/Core/`, `src/Support/`, `public/index.php`, `console`, `config/`, `composer.json`.
 
-KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.0'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
+KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.1'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
 
 ## Design philosophy
 

@@ -26,7 +26,7 @@ use Throwable;
  */
 class Application extends Container
 {
-    private const VERSION = '1.2.0';
+    private const VERSION = '1.2.1';
 
     private static ?Application $instance = null;
 

@@ -75,10 +75,15 @@ class Connection
                 $options
             );
 
-            // Set charset for MySQL
+            // Set charset for MySQL. SET NAMES takes no placeholders, so this
+            // is the one statement in the class built by interpolation — hence
+            // the validation. The values come from config rather than a
+            // request, so this is not a live injection route; it is here so the
+            // "no interpolation, ever" rule the rest of the class follows has
+            // no exception a reader has to reason about.
             if ($this->config['driver'] === 'mysql') {
-                $charset = $this->config['charset'];
-                $collation = $this->config['collation'];
+                $charset = $this->validateCharsetToken($this->config['charset'], 'charset');
+                $collation = $this->validateCharsetToken($this->config['collation'], 'collation');
                 $this->pdo->exec("SET NAMES '{$charset}' COLLATE '{$collation}'");
             }
         } catch (PDOException $e) {
@@ -125,8 +130,14 @@ class Connection
     {
         $statement = $this->getPdo()->prepare($sql);
         $this->bindValues($statement, $bindings);
-        $statement->execute();
+
+        // Assigned BEFORE execute(): a throwing statement used to leave
+        // lastStatement pointing at the previous one, so affectedRows() went on
+        // reporting that statement's count. A stale number is worse than zero,
+        // because it looks like a successful write.
         $this->lastStatement = $statement;
+
+        $statement->execute();
 
         return $statement;
     }
@@ -380,6 +391,24 @@ class Connection
     public function affectedRows(): int
     {
         return $this->lastStatement?->rowCount() ?? 0;
+    }
+
+    /**
+     * Validate a charset or collation name before it is interpolated
+     *
+     * @throws InvalidArgumentException when it is not a bare MySQL name
+     */
+    private function validateCharsetToken(mixed $value, string $what): string
+    {
+        if (!is_string($value) || !preg_match('/^[A-Za-z0-9_]+$/', $value)) {
+            throw new InvalidArgumentException(sprintf(
+                'Database %s must be a bare name matching [A-Za-z0-9_]+, %s given.',
+                $what,
+                is_string($value) ? "'{$value}'" : get_debug_type($value)
+            ));
+        }
+
+        return $value;
     }
 
     /**

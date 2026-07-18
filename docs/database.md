@@ -40,6 +40,8 @@ public function delete(string $table, array $where): int
 - ⚠ **`update()`, `delete()` and `affectedRows()` return rows *changed*, not rows *matched*** (as of 2026-07-18). `MYSQL_ATTR_FOUND_ROWS` is not set, so rewriting a row with identical values returns 0 — indistinguishable from "no such row". Do not use the return value as an existence check; `SELECT` first when you need to tell those apart. A deployment that prefers matched-row semantics can set the attribute itself via `config('database.connections.*.options')`, which is merged into PDO's options — the base does not set it because flipping it would silently change the meaning of every existing downstream's return value.
 - ⚠ **`upsert()` returns 0 whenever the update path is taken** (as of 2026-07-18), because MySQL's `lastInsertId()` reports nothing for `ON DUPLICATE KEY UPDATE`. A 0 means "updated an existing row" *or* "failed" — check `affectedRows()` (1 = inserted, 2 = updated with a change, 0 = updated with no change) if you need to distinguish.
 - **Bindings must be scalar or null.** An array or object binding throws `InvalidArgumentException`; it previously reached PDO and stringified to the literal `'Array'`, writing that into the column. A list of values is `whereIn()`'s job.
+- ⚠ **`insert()` returns 0 on a table with no AUTO_INCREMENT** (as of 2026-07-18), because that is what `lastInsertId()` reports — indistinguishable from failure. A failed insert throws, so treat "no exception" as success and ignore the return value on such tables. Same shape as the `upsert()` note above.
+- **`affectedRows()` reports the most recent statement, including a failed one** (it returns 0 there). It used to keep reporting the *previous* statement's count after a failure, which read as a successful write.
 
 ### Transactions
 
@@ -67,9 +69,19 @@ public function disconnect(): void
 public function isConnected(): bool
 public function getPrefix(): string
 public function getDatabaseName(): string
+public function getPdo(): PDO
 ```
 
-`quoteIdentifier()` backtick-quotes identifiers and understands `table.column` dotting; strings already containing a backtick or a space pass through unchanged (raw-SQL alias escape hatch). Acceptance is governed by the QueryBuilder's stricter `validateIdentifier()` — this method only quotes.
+`quoteIdentifier()` backtick-quotes identifiers, understands `table.column` dotting, and passes `*` / `table.*` through unquoted. It **fails closed**: an identifier containing a backtick or a space throws rather than passing through — that passthrough was an alias escape hatch, and it made the method an injection route for exactly the inputs that matter. Aliases and expressions belong in a `RawExpression`. Acceptance is still governed by the QueryBuilder's stricter `validateIdentifier()`; this method only quotes, and neither is a substitute for the other.
+
+### Server expectations
+
+The base does **not** assert server-side settings — these are deployment policy, the same line drawn for the scheduler lock and the session store. Two are worth setting deliberately:
+
+- **`sql_mode`** — a non-strict server silently truncates oversize values instead of erroring. Run with `STRICT_TRANS_TABLES` at minimum.
+- **Session time zone** — `NOW()` follows the server's zone while application code writes GMT; the two were measured 180 minutes apart on a development machine here. Prefer application-generated timestamps, or set the connection time zone explicitly.
+
+Both can be applied per connection through `config('database.connections.*.options')`, which is merged into PDO's options — for example an `PDO::MYSQL_ATTR_INIT_COMMAND` setting `sql_mode` and `time_zone`.
 
 ---
 
@@ -116,8 +128,9 @@ public function rightJoin(...): self
 ### WHERE clauses
 
 ```php
-public function where(string $column, mixed $operatorOrValue = null, mixed $value = null): self
-public function orWhere(string $column, mixed $operatorOrValue = null, mixed $value = null): self
+public function where(string|Closure $column, mixed $operatorOrValue = null, mixed $value = null): self
+public function orWhere(string|Closure $column, mixed $operatorOrValue = null, mixed $value = null): self
+// a Closure opens a parenthesised group — see "Grouping" below
 public function whereIn(string $column, array $values): self
 public function whereNotIn(string $column, array $values): self
 public function whereNull(string $column): self
@@ -133,7 +146,28 @@ public function whereRaw(string $sql, array $bindings = []): self
 - `whereRaw()` requires the `?` placeholder count to equal `count($bindings)` (throws otherwise) and rewrites them into named bindings. The fragment text is the caller's responsibility; values always go through `$bindings`.
 - Chaining: only `orWhere()` produces `OR` — every other variant is `AND`; there is no grouped-parenthesis support (use `whereRaw()` for `(a OR b)` groups).
 
-⚠ **Mixed AND/OR chains are precedence-sensitive** (as of 2026-07-18). Conditions compile as a flat list, so `where('a')->orWhere('b')->where('c')` is `a OR (b AND c)`, not `(a OR b) AND c`. Grouping is not modelled. When a chain mixes both booleans and the grouping matters — authorization filters especially — use `whereRaw()` with explicit parentheses.
+### Grouping — mixed AND/OR chains
+
+Conditions compile as a **flat list**, and SQL binds `AND` tighter than `OR`. So a mixed chain does not mean what it reads like:
+
+```php
+->where('a', 1)->orWhere('b', 2)->where('c', 3)
+// WHERE `a` = :p0 OR `b` = :p1 AND `c` = :p2      →  a OR (b AND c)
+```
+
+That is what SQL means, and it is left as-is deliberately — silently re-grouping it would change every existing query. When you want the other reading, pass a **closure** to `where()` or `orWhere()`:
+
+```php
+->where('tenant_id', $tenant)
+->where(fn ($q) => $q->where('owner_id', $user)->orWhere('public', 1))
+// WHERE `tenant_id` = :p0 AND (`owner_id` = :p1 OR `public` = :p2)
+```
+
+Groups nest, and the sub-builder continues the outer query's placeholder numbering so bindings never collide. Column and operator validation applies identically inside a group. An empty closure adds nothing rather than emitting `()`.
+
+Use a group rather than `whereRaw()` for this. Reaching for raw SQL to get parentheses was the previous advice, and it pushed authorization filters — the queries where grouping matters most — into the one method that accepts arbitrary SQL text.
+
+The empty-`whereIn()` guard composes with grouping: an empty `IN` nullifies its own group, and an always-false group that is AND-joined nullifies the whole query.
 
 ### Ordering, grouping, pagination
 

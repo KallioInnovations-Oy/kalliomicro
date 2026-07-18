@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KallioMicro\Database;
 
+use Closure;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -142,18 +143,38 @@ class QueryBuilder
     }
 
     /**
-     * Add a WHERE clause
+     * Add a WHERE clause, or a parenthesised group of them
+     *
+     * Passing a Closure opens a nested group:
+     *
+     *     ->where('tenant_id', $tenant)
+     *     ->where(fn ($q) => $q->where('owner_id', $user)->orWhere('public', 1))
+     *     // WHERE `tenant_id` = :p0 AND (`owner_id` = :p1 OR `public` = :p2)
+     *
+     * Grouping exists because conditions otherwise compile as a flat list and
+     * SQL binds AND tighter than OR, so a mixed chain does not mean what it
+     * reads like. Before this, the only way to express the query above was
+     * whereRaw() — pushing authorization filters, of all things, into the one
+     * escape hatch that accepts arbitrary SQL text.
      */
-    public function where(string $column, mixed $operatorOrValue = null, mixed $value = null): self
+    public function where(string|Closure $column, mixed $operatorOrValue = null, mixed $value = null): self
     {
+        if ($column instanceof Closure) {
+            return $this->addNestedWhere($column, 'AND');
+        }
+
         return $this->addWhere('basic', $column, $operatorOrValue, $value, 'AND', func_num_args());
     }
 
     /**
-     * Add an OR WHERE clause
+     * Add an OR WHERE clause, or a parenthesised group of them
      */
-    public function orWhere(string $column, mixed $operatorOrValue = null, mixed $value = null): self
+    public function orWhere(string|Closure $column, mixed $operatorOrValue = null, mixed $value = null): self
     {
+        if ($column instanceof Closure) {
+            return $this->addNestedWhere($column, 'OR');
+        }
+
         return $this->addWhere('basic', $column, $operatorOrValue, $value, 'OR', func_num_args());
     }
 
@@ -288,6 +309,40 @@ class QueryBuilder
             'column' => $this->validateIdentifier($column),
             'operator' => $this->validateOperator((string) $operatorOrValue),
             'value' => $bindingKey,
+            'boolean' => $boolean,
+        ];
+
+        return $this;
+    }
+
+    /**
+     * Capture a closure's conditions as one parenthesised group
+     *
+     * The sub-builder continues this builder's placeholder numbering and hands
+     * its bindings back, so nested groups cannot collide with the outer query
+     * on :pN — the whole point of binding is lost if two values share a name.
+     */
+    private function addNestedWhere(Closure $callback, string $boolean): self
+    {
+        $nested = new self($this->connection, $this->table);
+        $nested->bindingIndex = $this->bindingIndex;
+
+        $callback($nested);
+
+        if ($nested->wheres === []) {
+            // An empty group would compile to "()", a syntax error. Nothing
+            // was asked for, so nothing is added.
+            return $this;
+        }
+
+        $this->bindingIndex = $nested->bindingIndex;
+        $this->bindings = array_merge($this->bindings, $nested->bindings);
+
+        $this->wheres[] = [
+            'type' => 'nested',
+            'column' => '',
+            'operator' => '',
+            'value' => $nested->wheres,
             'boolean' => $boolean,
         ];
 
@@ -537,6 +592,11 @@ class QueryBuilder
     public function value(string $column): mixed
     {
         $this->columns = [$this->validateIdentifier($column)];
+
+        // first() clamps and this did not, so reading one value pulled the
+        // whole matching set across the wire to discard all but its first row.
+        $this->limit(1);
+
         return $this->connection->selectValue($this->toSql(), $this->bindings);
     }
 
@@ -555,15 +615,31 @@ class QueryBuilder
         $this->columns = $key ? [$key, $column] : [$column];
         $results = $this->get();
 
-        if ($key) {
+        // A qualified column arrives keyed by its bare name — MySQL labels
+        // `users`.`name` as 'name' — so looking it up as 'users.name' silently
+        // returned an empty array (or, keyed, a warning per row).
+        $columnKey = $this->resultKey($column);
+        $keyKey = $key !== null ? $this->resultKey($key) : null;
+
+        if ($keyKey !== null) {
             $plucked = [];
             foreach ($results as $row) {
-                $plucked[$row[$key]] = $row[$column];
+                $plucked[$row[$keyKey]] = $row[$columnKey];
             }
             return $plucked;
         }
 
-        return array_column($results, $column);
+        return array_column($results, $columnKey);
+    }
+
+    /**
+     * The array key a selected column arrives under in a result row
+     */
+    private function resultKey(string $column): string
+    {
+        $separator = strrpos($column, '.');
+
+        return $separator === false ? $column : substr($column, $separator + 1);
     }
 
     /**
@@ -795,16 +871,54 @@ class QueryBuilder
             return '';
         }
 
-        // An AND-joined always-false condition absorbs every other condition,
-        // so it replaces the clause outright rather than being appended to it.
-        foreach ($this->wheres as $where) {
-            if ($where['type'] === 'alwaysFalse' && $where['boolean'] === 'AND') {
-                return ' WHERE 0 = 1';
+        return ' WHERE ' . $this->compileWhereList($this->wheres);
+    }
+
+    /**
+     * Is this condition list unconditionally false?
+     *
+     * True when it contains an AND-joined always-false condition — an empty
+     * whereIn() — at this level or inside an AND-joined nested group. Such a
+     * condition absorbs everything beside it, and recursing matters: a group
+     * that is itself always false makes its AND-joined parent false too.
+     *
+     * @param array<int, array{type: string, column: string, operator: string, value: mixed, boolean: string}> $wheres
+     */
+    private function listIsAlwaysFalse(array $wheres): bool
+    {
+        foreach ($wheres as $where) {
+            if ($where['boolean'] !== 'AND') {
+                continue;
+            }
+
+            if ($where['type'] === 'alwaysFalse') {
+                return true;
+            }
+
+            if ($where['type'] === 'nested' && $this->listIsAlwaysFalse($where['value'])) {
+                return true;
             }
         }
 
+        return false;
+    }
+
+    /**
+     * Compile one condition list — recursive, so nested groups reuse it
+     *
+     * @param array<int, array{type: string, column: string, operator: string, value: mixed, boolean: string}> $wheres
+     */
+    private function compileWhereList(array $wheres): string
+    {
+        // Checked per list rather than only at the top level: an empty
+        // whereIn() inside a group has to nullify that group, or the
+        // fail-open the guard exists to prevent simply moves inside the parens.
+        if ($this->listIsAlwaysFalse($wheres)) {
+            return '0 = 1';
+        }
+
         $parts = [];
-        foreach ($this->wheres as $i => $where) {
+        foreach ($wheres as $i => $where) {
             $clause = '';
 
             if ($i > 0) {
@@ -855,12 +969,16 @@ class QueryBuilder
                 case 'alwaysFalse':
                     $clause .= $where['column'];
                     break;
+
+                case 'nested':
+                    $clause .= '(' . $this->compileWhereList($where['value']) . ')';
+                    break;
             }
 
             $parts[] = $clause;
         }
 
-        return ' WHERE ' . implode('', $parts);
+        return implode('', $parts);
     }
 
     private function compileGroupBy(): string

@@ -7,6 +7,72 @@ newer base.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.1] – 2026-07-18
+
+Closes the QueryBuilder items left open by 1.2.0. One new method, four fixes,
+two known limits documented rather than changed. No breaking changes.
+
+### Added
+
+- **Nested `where()` / `orWhere()` groups.** Passing a `Closure` opens a
+  parenthesised group:
+
+  ```php
+  ->where('tenant_id', $tenant)
+  ->where(fn ($q) => $q->where('owner_id', $user)->orWhere('public', 1))
+  // WHERE `tenant_id` = :p0 AND (`owner_id` = :p1 OR `public` = :p2)
+  ```
+
+  Conditions compile as a flat list and SQL binds `AND` tighter than `OR`, so a
+  mixed chain does not mean what it reads like — `where->orWhere->where` is
+  `a OR (b AND c)`. That behaviour is unchanged, because it is what SQL means
+  and re-grouping it would alter every existing query; what changes is that
+  expressing the *other* reading no longer requires `whereRaw()`. Sending
+  authorization filters — the queries where grouping matters most — through the
+  one method that accepts arbitrary SQL text was a bad incentive to ship.
+
+  Groups nest. The sub-builder continues the outer placeholder numbering, so
+  bindings cannot collide on `:pN`. Column and operator validation applies
+  identically inside a group. An empty closure adds nothing rather than
+  emitting `()`. The empty-`whereIn()` guard composes: an empty `IN` nullifies
+  its own group, and an always-false group joined with `AND` nullifies the
+  whole query.
+
+### Fixed
+
+- **`pluck()` on a qualified column returned an empty array.** MySQL labels
+  `` `users`.`name` `` as `name`, so looking the value up as `users.name` found
+  nothing — silently, and per-row warnings in the keyed form.
+- **`value()` did not apply `LIMIT 1`**, so reading one value pulled the whole
+  matching set across the wire. `first()` already clamped; the asymmetry was an
+  oversight.
+- **`affectedRows()` reported the previous statement after a failure.**
+  `lastStatement` was assigned after `execute()`, so a throwing statement left
+  a stale count behind — which reads as a successful write that never happened.
+- **`SET NAMES` interpolated charset and collation unvalidated.** Not
+  exploitable (both come from config, not from a request), but it was the only
+  interpolated statement in a class whose stated contract is "no interpolation,
+  ever"; both are now validated against `[A-Za-z0-9_]+`.
+
+### Documented, not changed
+
+- **`insert()` returns 0 on a table with no AUTO_INCREMENT** — that is what
+  `lastInsertId()` reports, and it is indistinguishable from failure. A failed
+  insert throws, so treat "no exception" as success there. Same shape as the
+  `upsert()` note in 1.2.0.
+- **`sql_mode` and the session time zone are not asserted.** A non-strict server
+  silently truncates oversize values, and `NOW()` follows the server zone while
+  application code writes GMT — measured 180 minutes apart on a development
+  machine. Both are deployment policy, consistent with the line drawn for the
+  scheduler lock and session store, and both can be set per connection through
+  `config('database.connections.*.options')`.
+
+### Internal
+
+- `FakeConnection` stubs `selectValue()`. Without it, `value()` fell through to
+  the real `Connection` and tried to open a database handle mid-test — the same
+  class of gap that let ``SELECT `*` `` pass a green suite for a release.
+
 ## [1.2.0] – 2026-07-18
 
 Closes an eight-area adversarial audit of `src/` run from a downstream project.

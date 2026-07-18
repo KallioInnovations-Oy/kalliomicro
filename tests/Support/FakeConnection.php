@@ -22,6 +22,9 @@ class FakeConnection extends Connection
     /** @var array<int, array<string, mixed>|null> Queued rows for selectOne() */
     private array $selectOneResults = [];
 
+    /** @var array<int, mixed> Queued scalars for selectValue() */
+    private array $selectValueResults = [];
+
     public function __construct()
     {
         parent::__construct(['driver' => 'sqlite', 'database' => ':memory:']);
@@ -53,5 +56,21 @@ class FakeConnection extends Connection
     {
         $this->queries[] = ['sql' => $sql, 'bindings' => $bindings];
         return array_shift($this->selectOneResults);
+    }
+
+    /**
+     * Stubbed for the same reason as select()/selectOne(): value() routes here,
+     * and without an override it fell through to the real Connection and tried
+     * to open a database handle mid-test.
+     */
+    public function selectValue(string $sql, array $bindings = []): mixed
+    {
+        $this->queries[] = ['sql' => $sql, 'bindings' => $bindings];
+        return array_shift($this->selectValueResults);
+    }
+
+    public function queueSelectValue(mixed $value): void
+    {
+        $this->selectValueResults[] = $value;
     }
 }
