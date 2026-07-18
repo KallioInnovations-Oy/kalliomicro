@@ -151,21 +151,32 @@ const KallioMicro = (function() {
 
     /**
      * Load content into a target
+     *
+     * `data-target` does not control placement and never has: the client only
+     * acts on the actions in the response, and each of those names its own
+     * target (replace/append/prepend/…). The attribute is accepted so markup
+     * can document intent, but it is inert — so it is no longer required
+     * (requiring an ignored attribute is worse than not reading it), and
+     * using one is warned about instead of silently doing nothing.
      */
     function handleActionLoad(element) {
         const url = element.dataset.url;
-        const target = element.dataset.target;
         const method = element.dataset.method || 'GET';
 
-        if (!url || !target) {
-            console.error('Missing url or target for load action');
+        if (!url) {
+            console.error('Missing url for load action');
             return;
+        }
+
+        if (element.dataset.target) {
+            console.warn(`KallioMicro: data-target="${element.dataset.target}" on a load action is inert — placement comes from the server's action (see docs/api-response.md).`);
         }
 
         setLoading(element, true);
 
         request(url, { method })
             .then(response => processResponse(response, element))
+            .catch(error => reportClientError('load action', error))
             .finally(() => setLoading(element, false));
     }
 
@@ -188,6 +199,7 @@ const KallioMicro = (function() {
 
                 request(url, { method, data })
                     .then(response => processResponse(response, element))
+                    .catch(error => reportClientError('confirm action', error))
                     .finally(() => setLoading(element, false));
             }
         });
@@ -211,6 +223,7 @@ const KallioMicro = (function() {
                         processResponse(response, element);
                     }
                 })
+                .catch(error => reportClientError('modal action', error))
                 .finally(() => setLoading(element, false));
         }
     }
@@ -219,7 +232,7 @@ const KallioMicro = (function() {
      * Toggle visibility/class
      */
     function handleActionToggle(element) {
-        const target = document.querySelector(element.dataset.target);
+        const target = queryTarget(element.dataset.target, 'toggle action');
         if (!target) return;
 
         const toggleClass = element.dataset.toggleClass || 'd-none';
@@ -266,6 +279,7 @@ const KallioMicro = (function() {
 
         request(url, { method, body: formData })
             .then(response => processResponse(response, trigger || form))
+            .catch(error => reportClientError('form submission', error))
             .finally(() => setLoading(trigger || form, false));
     }
 
@@ -309,14 +323,44 @@ const KallioMicro = (function() {
                 return await response.json();
             }
 
-            // Non-JSON response
-            const text = await response.text();
-            return {
-                success: response.ok,
-                code: response.ok ? 1 : 4,
-                message: '',
-                data: { content: text },
+            // Non-JSON response: reported as a failure, body discarded.
+            //
+            // It used to be wrapped as data.content, which showModal() and
+            // replaceContent() feed straight to innerHTML/insertAdjacentHTML.
+            // fetch follows redirects transparently, so an auth or consent
+            // gate answering 302 → HTML login page arrived here looking like
+            // the endpoint's own output, and its entire page — forms, tokens,
+            // whatever the gate renders — got injected into a modal. Nothing
+            // in the envelope distinguished that from a legitimate partial,
+            // so the only sound rule is that a body the server did not label
+            // application/json never reaches an HTML sink. Controllers serve
+            // modal content the documented way: a JSON envelope with a
+            // `modal` action (or explicit JSON data.content).
+            const redirectedTo = response.redirected ? response.url : null;
+
+            console.error(
+                `KallioMicro: expected JSON from ${url}, got "${contentType || 'no content-type'}"`
+                + (redirectedTo ? ` after a redirect to ${redirectedTo}` : '')
+            );
+
+            const result = {
+                success: false,
+                code: 4,
+                message: redirectedTo
+                    ? 'Your session or permissions may have changed. Please reload the page.'
+                    : 'Unexpected server response. Please try again.',
             };
+
+            // A same-origin redirect is nearly always a login or consent gate:
+            // send the browser there so the user can actually resolve it.
+            // Cross-origin destinations are only reported, never navigated to,
+            // so a server-side open redirect cannot turn a background request
+            // into an off-site navigation.
+            if (redirectedTo && isSameOrigin(redirectedTo)) {
+                result.actions = [{ type: 'redirect', url: redirectedTo }];
+            }
+
+            return result;
         } catch (error) {
             console.error('Request failed:', error);
             return {
@@ -348,7 +392,16 @@ const KallioMicro = (function() {
         // Execute actions
         if (response.actions && Array.isArray(response.actions)) {
             for (const action of response.actions) {
-                executeAction(action, trigger);
+                // Actions are independent: one that throws — most commonly a
+                // malformed selector making querySelector raise SyntaxError —
+                // must not abort the ones after it, and must not escape as an
+                // unhandled promise rejection nobody sees.
+                try {
+                    executeAction(action, trigger);
+                } catch (error) {
+                    console.error(`KallioMicro: action "${action && action.type}" failed:`, error);
+                    flash('Part of the page could not be updated. Please reload.', 'error');
+                }
             }
         }
 
@@ -478,8 +531,25 @@ const KallioMicro = (function() {
 
     // DOM manipulation functions
 
-    function replaceContent(selector, content) {
+    /**
+     * Resolve an action's target, warning when the selector matches nothing.
+     *
+     * The no-op itself is kept: a page may legitimately not contain every
+     * target a shared response names, and throwing would take out the rest of
+     * the action list. But a *silent* no-op is indistinguishable from a
+     * feature that works, and downstream projects have lost whole features to
+     * a stale selector nobody could see failing — so every miss is announced.
+     */
+    function queryTarget(selector, actionType) {
         const element = document.querySelector(selector);
+        if (!element) {
+            console.warn(`KallioMicro: no element matches "${selector}" — ${actionType} skipped`);
+        }
+        return element;
+    }
+
+    function replaceContent(selector, content) {
+        const element = queryTarget(selector, 'replace');
         if (element) {
             element.innerHTML = content;
             initializeNewContent(element);
@@ -487,7 +557,7 @@ const KallioMicro = (function() {
     }
 
     function appendContent(selector, content) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'append');
         if (element) {
             element.insertAdjacentHTML('beforeend', content);
             initializeNewContent(element.lastElementChild);
@@ -495,7 +565,7 @@ const KallioMicro = (function() {
     }
 
     function prependContent(selector, content) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'prepend');
         if (element) {
             element.insertAdjacentHTML('afterbegin', content);
             initializeNewContent(element.firstElementChild);
@@ -503,14 +573,14 @@ const KallioMicro = (function() {
     }
 
     function removeElement(selector) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'remove');
         if (element) {
             element.remove();
         }
     }
 
     function updateField(selector, value) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'update_field');
         if (element) {
             if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA' || element.tagName === 'SELECT') {
                 element.value = value;
@@ -522,46 +592,50 @@ const KallioMicro = (function() {
 
     function toggleDisabled(selector, disabled) {
         const elements = document.querySelectorAll(selector);
+        if (elements.length === 0) {
+            console.warn(`KallioMicro: no element matches "${selector}" — toggle_disabled skipped`);
+            return;
+        }
         elements.forEach(el => el.disabled = disabled);
     }
 
     function toggleVisibility(selector, visible) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'toggle_visibility');
         if (element) {
             element.classList.toggle('d-none', !visible);
         }
     }
 
     function toggleClass(selector, className, add) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'toggle_class');
         if (element) {
             element.classList.toggle(className, add);
         }
     }
 
     function scrollTo(selector) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'scroll_to');
         if (element) {
             element.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
     }
 
     function focusElement(selector) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'focus');
         if (element) {
             element.focus();
         }
     }
 
     function triggerEvent(selector, eventName, detail = {}) {
-        const element = document.querySelector(selector);
+        const element = queryTarget(selector, 'trigger_event');
         if (element) {
             element.dispatchEvent(new CustomEvent(eventName, { detail, bubbles: true }));
         }
     }
 
     function clearForm(selector) {
-        const form = document.querySelector(selector);
+        const form = queryTarget(selector, 'clear_form');
         if (form) {
             form.querySelectorAll('input, textarea, select').forEach(el => {
                 if (el.type === 'checkbox' || el.type === 'radio') {
@@ -576,7 +650,7 @@ const KallioMicro = (function() {
     }
 
     function resetForm(selector) {
-        const form = document.querySelector(selector);
+        const form = queryTarget(selector, 'reset_form');
         if (form) {
             form.reset();
         }
@@ -594,7 +668,7 @@ const KallioMicro = (function() {
     // DataTable functions
 
     function refreshDataTable(selector, data) {
-        const table = document.querySelector(selector);
+        const table = queryTarget(selector, 'refresh_table');
         if (!table) return;
 
         // If using DataTables library
@@ -615,7 +689,7 @@ const KallioMicro = (function() {
     }
 
     function addTableRows(selector, rowsHtml) {
-        const tbody = document.querySelector(`${selector} tbody`);
+        const tbody = queryTarget(`${selector} tbody`, 'add_table_rows');
         if (tbody) {
             tbody.insertAdjacentHTML('beforeend', rowsHtml);
             initializeNewContent(tbody);
@@ -637,15 +711,20 @@ const KallioMicro = (function() {
         const modalId = id || `km-modal-${modalLevel}`;
 
         // Create modal structure
+        // id/size/level land inside quoted attributes and come from the
+        // server's action payload, so they are attribute-escaped. `content` is
+        // deliberately raw — it is the server-rendered modal body, the whole
+        // point of the action — and reaches here only from a JSON envelope
+        // (see the non-JSON handling in request()).
         const modalHtml = `
-            <div class="modal fade km-modal" id="${modalId}" data-level="${modalLevel}" tabindex="-1" role="dialog">
-                <div class="modal-dialog modal-${size}" role="document">
+            <div class="modal fade km-modal" id="${escapeAttr(modalId)}" data-level="${escapeAttr(modalLevel)}" tabindex="-1" role="dialog">
+                <div class="modal-dialog modal-${escapeAttr(size)}" role="document">
                     <div class="modal-content">
                         ${content}
                     </div>
                 </div>
             </div>
-            <div class="modal-backdrop fade show km-backdrop" data-level="${modalLevel}"></div>
+            <div class="modal-backdrop fade show km-backdrop" data-level="${escapeAttr(modalLevel)}"></div>
         `;
 
         // Get or create modal container
@@ -911,6 +990,42 @@ const KallioMicro = (function() {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    /**
+     * Escape a value interpolated into a double-quoted HTML attribute.
+     * escapeHtml() is text-node serialization — it leaves `"` untouched, which
+     * is safe between tags but would let a value close the attribute and open
+     * a new one, so attributes need their own escape.
+     */
+    function escapeAttr(value) {
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    /**
+     * True when url resolves to this page's origin.
+     */
+    function isSameOrigin(url) {
+        try {
+            return new URL(url, window.location.href).origin === window.location.origin;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Last resort for the request promise chains. request() already turns
+     * network failures into an error envelope, so anything arriving here is a
+     * client-side bug; report it rather than let it become an unhandled
+     * rejection that only shows up in a console nobody has open.
+     */
+    function reportClientError(context, error) {
+        console.error(`KallioMicro: ${context} failed:`, error);
+        flash('Something went wrong handling the server response.', 'error');
     }
 
     function initializeNewContent(element) {

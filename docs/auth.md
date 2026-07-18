@@ -86,9 +86,14 @@ Service-account bind → search (`user_filter`, default `(sAMAccountName={userna
 
 Reserved session keys: `_csrf_token`, `_last_regenerated`, `_authenticated`, `_user`, `_login_time`, `_flash`, `_impersonating`, `_original_user`, `_intended_url`, `_oauth_state`, `_oauth_code_verifier`.
 
+**Privilege changes rotate both the session id and the CSRF token** — `login()`, `logout()`, `impersonate()` and `stopImpersonating()`. Rotating the token matters independently of the id: it was previously minted once and never replaced, so its validity window was the whole browser session and anything exposed pre-authentication stayed usable for authenticated writes afterwards.
+
+**`logout()` clears the session wholesale** and mints a fresh token, rather than unsetting known keys. Unsetting left flash data, the intended URL and any in-progress impersonation behind for the next person to use that browser, and obliged every downstream to maintain its own cleanup list.
+
 **Scope notes (by design):**
 
 - **Native PHP file sessions.** There is no database session handler in the base — a multi-replica deployment (load-balanced containers with ephemeral disks) registers its own `SessionHandlerInterface` before scaling out.
+- **No idle or absolute session timeout.** The cookie lifetime is refreshed by every id regeneration, so an active session slides indefinitely with no re-authentication boundary. `getLoginTime()` is the mechanism a deployment needs to impose one; the policy — how long, and whether idle or absolute — belongs to the deployment.
 - **`impersonate()` is a mechanism, not a policy** — it swaps the session user for whatever array you pass, with no authorization check. The *caller* gates it (admin role check or equivalent); the base cannot know which role model a deployment uses.
 
 `setIntendedUrl()` sanitizes its input to a **same-origin relative path**, so the post-login redirect does not become an open redirect even though `AuthMiddleware` feeds it the raw request URL. The sanitizer is `Session::sanitizeRelativeUrl()`, a `public static` pure function also backing `Controller::back()` — reuse it for any redirect target that a client can influence.

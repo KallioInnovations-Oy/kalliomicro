@@ -92,7 +92,7 @@ require routes/web.php + routes/api.php
 $app->run()
 ```
 
-`run()` captures the `Request`, runs `handle()` (boot → global middleware pipeline, outermost-first in registration order → `Router::dispatch()`), sends the `Response`, then `terminate()` (no-op hook). Any `Throwable` inside `handle()` renders a 500 — JSON (`{error, message[, trace]}`) for `expectsJson()` requests, HTML otherwise; message and trace are exposed only when `config('app.debug')` is true.
+`run()` captures the `Request`, runs `handle()` (boot → global middleware pipeline, outermost-first in registration order → `Router::dispatch()`), sends the `Response`, then `terminate()` (no-op hook). A `Throwable` inside `handle()` is rendered by `ExceptionHandler` (see below) at the status `getHttpCode()` maps it to — not a blanket 500, so `abort()` and `HttpException` surface correctly — as JSON for `expectsJson()` requests and HTML otherwise. Rendering happens **at the destination**, so the error response travels back out through the global middleware stack like any other.
 
 ### CLI — `console`
 
@@ -132,8 +132,8 @@ Global functions (each guarded by `function_exists`):
 
 Other Support classes:
 
-- **`Logger`** — DB (`core_logs`: origdate, user_id, rowtype, logsource, logsourceid, eventtype, eventdescription) or file (`storage/logs/app.log`); KallioMicro levels `0=BYPASS, 1=SUCCESS, 2=INFO, 3=WARNING, 4=ERROR` plus PSR-3 method names mapped onto them; `{key}` context interpolation; per-channel clones via `channel()`; DB failure falls back to file.
-- **`Communicator`** — SMTP email via PHPMailer (`sendEmail`), Microsoft Teams (`sendTeamsNotification`), Slack (`sendSlackNotification`), generic webhooks (`sendWebhook`; TLS verification on). Returns `CommunicatorResult` (`isSuccess()`/`isFailure()`). Config from `MAIL_*` / `WEBHOOK_*` env by default.
+- **`Logger`** — DB (`core_logs`: origdate, user_id, rowtype, logsource, logsourceid, eventtype, eventdescription, context) or file (`storage/logs/app.log`); KallioMicro levels `0=BYPASS, 1=SUCCESS, 2=INFO, 3=WARNING, 4=ERROR` plus PSR-3 method names mapped onto them; `{key}` context interpolation; per-channel clones via `channel()`; DB failure falls back to file. The DDL for `core_logs` is in [`database/schema.sql`](../database/schema.sql) — the column list is a contract, and a mismatch makes every insert fail 42S22 and fall back to file. CR/LF in the message, source and source id are escaped so one call can never write more than one line (log-injection defence), and the special context keys `user_id`/`source_id`/`source` are coerced rather than trusted — a wrong-typed value used to raise a `TypeError` out of the logger and kill its caller.
+- **`Communicator`** — SMTP email via PHPMailer (`sendEmail`), Microsoft Teams (`sendTeamsNotification`), Slack (`sendSlackNotification`), generic webhooks (`sendWebhook`; TLS verification on). Returns `CommunicatorResult` (`isSuccess()`/`isFailure()`). Config from `config/notifications.php` (`notifications.email` / `notifications.webhooks`, populated from `MAIL_*` / `WEBHOOK_*` env); constructor arguments merge *over* that, so a partial array overrides only the keys it names.
 - **`DotEnv`** — see above.
 
 ---

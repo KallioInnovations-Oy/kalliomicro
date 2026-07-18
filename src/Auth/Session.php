@@ -269,6 +269,12 @@ class Session
         // Regenerate session ID on login (prevent session fixation)
         $this->regenerate();
 
+        // And rotate the CSRF token with it. The token's validity window was
+        // otherwise the whole browser session, spanning every privilege
+        // boundary — anything exposed pre-auth stayed usable for authenticated
+        // writes afterwards.
+        $this->regenerateCsrfToken();
+
         $_SESSION['_authenticated'] = true;
         $_SESSION['_user'] = $user;
         $_SESSION['_login_time'] = time();
@@ -278,19 +284,26 @@ class Session
 
     /**
      * Log out the current user
+     *
+     * Clears the session wholesale rather than unsetting known keys. The old
+     * version removed three, leaving flash data, the intended URL, an
+     * in-progress impersonation and every application key behind — so per-user
+     * state leaked across logout into the next person to use that browser, and
+     * each downstream had to hand-maintain its own cleanup list.
      */
     public function logout(): void
     {
         $this->ensureStarted();
 
-        unset($_SESSION['_authenticated']);
-        unset($_SESSION['_user']);
-        unset($_SESSION['_login_time']);
-
+        $_SESSION = [];
         $this->user = null;
 
         // Regenerate session ID on logout
         $this->regenerate();
+
+        // A fresh token for the anonymous session: the old one outlived logout
+        // entirely, so a token captured while authenticated stayed valid.
+        $this->regenerateCsrfToken();
     }
 
     /**
@@ -300,6 +313,29 @@ class Session
     {
         $this->ensureStarted();
         return $_SESSION['_authenticated'] ?? false;
+    }
+
+    /**
+     * Unix timestamp of the current login, or null when not authenticated
+     *
+     * The base ships **no idle or absolute session timeout** — the cookie
+     * lifetime is refreshed by every id regeneration, so an active session
+     * slides indefinitely with no re-authentication boundary. That is a policy
+     * the deployment owns (see the scope notes in docs/auth.md), and this
+     * accessor is the mechanism it needs:
+     *
+     *     $age = time() - ($session->getLoginTime() ?? time());
+     *     if ($age > 43200) { $session->logout(); }
+     *
+     * Until 1.2.0 `_login_time` was written and never read by anything.
+     */
+    public function getLoginTime(): ?int
+    {
+        $this->ensureStarted();
+
+        $loginTime = $_SESSION['_login_time'] ?? null;
+
+        return is_int($loginTime) ? $loginTime : null;
     }
 
     /**
@@ -396,6 +432,11 @@ class Session
         $_SESSION['_impersonating'] = true;
         $_SESSION['_user'] = $user;
 
+        // Impersonation is the largest privilege change the framework offers,
+        // so it gets the same treatment as login.
+        $this->regenerate();
+        $this->regenerateCsrfToken();
+
         $this->user = $user;
     }
 
@@ -413,6 +454,10 @@ class Session
         $_SESSION['_user'] = $_SESSION['_original_user'];
         unset($_SESSION['_original_user']);
         unset($_SESSION['_impersonating']);
+
+        // Returning to the original identity is a privilege change too
+        $this->regenerate();
+        $this->regenerateCsrfToken();
 
         $this->user = $_SESSION['_user'];
     }
