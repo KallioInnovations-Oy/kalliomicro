@@ -61,7 +61,7 @@ The same command may be scheduled multiple times with different expressions — 
 * * * * * php /path/to/console schedule:run
 ```
 
-Per tick it parses each task's 5-field cron expression (`min hour day month weekday`; supports `*`, exact values, `a-b` ranges, `a,b,c` lists, `*/n` and `a-b/n` steps — no named months/weekdays) and runs every due task **inline, sequentially**. Anything outside that grammar — a zero step (`*/0`), a step on a list (`10,20/2`) — is **never due**: malformed fields silently don't match rather than crashing the tick. `--list` prints a table with due-now status and next run; `--force` runs everything regardless of schedule. Exit `1` if any task failed.
+Per tick it parses each task's 5-field cron expression (`min hour day month weekday`; supports `*`, exact values, `a-b` ranges, `a,b,c` lists, `*/n` and `a-b/n` steps — no named months/weekdays) and runs every due task **inline, sequentially**. A field is split on `,` first and each element matched independently, so lists and ranges mix freely in either order (`1,3-5`, `1-5,10`, `0-6/3,20`). Anything outside that grammar — a zero step (`*/0`), a step on a bare value (`20/2`) — is **never due**, and one malformed element disqualifies its whole field (`5,*/0` never matches, not even at minute 5): malformed fields silently don't match rather than crashing the tick. `--list` prints a table with due-now status and next run; `--force` runs everything regardless of schedule. Exit `1` if any task failed.
 
 ### Overlap protection
 

@@ -43,6 +43,14 @@ class Container
             $concrete = fn() => $this->build($concrete);
         }
 
+        // A re-bind must invalidate what an earlier resolve cached, or a
+        // bootstrap that overrides a base binding is correct only by
+        // ordering accident: one resolving line between the base binding
+        // and the override silently reverts to the base implementation.
+        // The singleton flag is cleared too, so bind() after singleton()
+        // really downgrades to a fresh-instance binding.
+        unset($this->instances[$abstract], $this->singletons[$abstract]);
+
         $this->bindings[$abstract] = $concrete;
     }
 

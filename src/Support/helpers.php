@@ -18,10 +18,16 @@ if (!function_exists('env')) {
             return $default;
         }
 
-        // Convert string representations to proper types
+        // Convert string representations to proper types.
+        // The negative words are coerced too: without them 'APP_DEBUG=off'
+        // returns the non-empty string 'off', which every truthiness check
+        // downstream reads as ENABLED — that is how a production deployment
+        // ships full stack traces while its .env says debugging is off.
+        // Only the negative side needs coercing: 'on'/'yes' already behave
+        // correctly as truthy strings, so no consumer needs them as `true`.
         return match (strtolower($value)) {
             'true', '(true)' => true,
-            'false', '(false)' => false,
+            'false', '(false)', 'off', '(off)', 'no', '(no)', 'disabled', '(disabled)' => false,
             'null', '(null)' => null,
             'empty', '(empty)' => '',
             default => $value,
@@ -162,10 +168,16 @@ if (!function_exists('csrf_field')) {
 if (!function_exists('e')) {
     /**
      * Escape HTML entities
+     *
+     * Delegates to ViewEngine so this and `$view->e()` — documented as
+     * interchangeable — cannot drift apart again: the two copies had already
+     * diverged on non-strings (TypeError here, 'Array' there) and on invalid
+     * UTF-8. Same contract: null → '', scalars and Stringable are escaped,
+     * anything else throws InvalidArgumentException.
      */
-    function e(?string $value): string
+    function e(mixed $value): string
     {
-        return htmlspecialchars($value ?? '', ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        return \KallioMicro\View\ViewEngine::escape($value);
     }
 }
 

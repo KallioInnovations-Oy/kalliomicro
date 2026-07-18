@@ -25,24 +25,30 @@ Handlers: `[Controller::class, 'method']` (preferred), a `Closure`, or `'Control
 
 ### Groups
 
-`group(['prefix' => '/app', 'middleware' => […]], fn (Router $router) => …)` — prefixes concatenate and middleware arrays merge (parent first) across arbitrary nesting; state is saved/restored around the callback. **Every group must state its middleware array explicitly** — the shipped route files guard the `/app` group and the protected `/api` section with `AuthMiddleware::class` (401 JSON for `wantsJson()` requests, login redirect for web).
+`group(['prefix' => '/app', 'middleware' => […]], fn (Router $router) => …)` — prefixes concatenate and middleware arrays merge (parent first) across arbitrary nesting; state is saved/restored around the callback in a `finally`, so a callback that throws cannot leak its prefix or middleware onto routes registered after it. **Every group must state its middleware array explicitly** — the shipped route files guard the `/app` group and the protected `/api` section with `AuthMiddleware::class` (401 JSON for `wantsJson()` requests, login redirect for web).
 
 ### Route parameters and constraints
 
 - `{param}` matches one non-slash segment; `{param?}` makes the **value** optional but not its separator slash — `/users/{id?}` matches `/users/` and `/users/5`, **not** `/users` (register a separate `/users` route for the bare path). Trailing slashes are always optional.
 - Constraints: `->where('id', '[0-9]+')`, `->whereArray()`, `->whereNumber()`, `->whereAlpha()`, `->whereAlphaNumeric()`, `->whereUuid()`; defaults for optional params via `->default('param', 'value')`.
-- Params arrive as string arguments after `$request` (by name), and via `$request->route('param')`.
+- Params arrive as string arguments after `$request` (by name), and via `$request->route('param')`. Captured values are `rawurldecode`d, so a segment sent as `a%2Fb` reaches the handler as `a/b`; `->default()` values are used verbatim.
 
 ### Named routes
 
 `->name('users.show')` names a route; `Router::url($name, $params)` / the global `url()` helper generate URLs from it (names are resolved lazily on first lookup, so registration order doesn't matter). Unknown names throw `RuntimeException`.
 
+Parameter values are `rawurlencode`d into a single path segment — `['id' => 'a/b']` yields `/users/a%2Fb`, not an extra path segment, and a value containing `?` or `#` cannot graft a query string or fragment onto the URL. Generation and extraction round-trip. Omitting a **required** `{param}` throws `InvalidArgumentException` naming the route, the missing parameter and what was given, rather than emitting the literal `/users/{id}`; unfilled `{param?}` placeholders are dropped as before.
+
 ### Dispatch semantics
 
 - Routes match **in registration order, first match wins** — register literal paths before overlapping wildcard paths.
-- Wrong HTTP verb on an existing path → **405 Method Not Allowed** with an `Allow` header listing the valid verbs (JSON body for `wantsJson()` requests, HTML otherwise).
-- No path match at all → 404 (JSON or HTML by the same rule).
-- Controller return values are coerced: `Response` as-is, array/object → JSON, string → HTML, `null` → 204.
+- Literal path text is regex-escaped, so `/files/report.pdf` matches only that path and metacharacters (`.`, `(`, `+`) in a route path are literal. Only `{param}` / `{param?}` placeholders become regex.
+- **`HEAD` is served by the matching `GET` route** (RFC 9110 §9.3.2): route middleware runs, the response keeps all its headers, and the body is stripped — with `Content-Length` set to the length the `GET` body would have had, unless the handler already set one. Registering an explicit `HEAD` route overrides the fallback.
+- **`OPTIONS` on a known path** is auto-answered `204` with an `Allow` header. **Scope note:** this is the `Allow` header only — CORS preflight (`Access-Control-Allow-*`) needs the request `Origin` and a per-deployment policy, so it belongs in middleware, not the router.
+- Wrong HTTP verb on an existing path → **405 Method Not Allowed** with an `Allow` header (JSON body for `wantsJson()` requests, HTML otherwise). `Allow` lists the registered verbs plus `HEAD` (when a `GET` route exists) and `OPTIONS`, since the router answers those without a registered route.
+- No path match at all → 404 (JSON or HTML by the same rule). The `HEAD`/`OPTIONS` fallbacks never resurrect an unknown path.
+- ⚠ **404/405 are decided before route middleware runs** (as of 2026-07-18). An anonymous client can therefore tell a guarded path from a nonexistent one by comparing a 405 against a 404 — the 405 leaks that the path exists behind the guard. Fixing this means moving the match/guard ordering, a routing-architecture change; treat path names as non-secret until then.
+- Handler return values are coerced, and this list is exhaustive: `Response` as-is, array/object → JSON, string → HTML, `null` → 204. **Anything else throws a `RuntimeException` naming the type** — a bare `return false;` used to become a 200 with an empty `text/plain` body, so a refused action read as a success. Send scalars explicitly via `Response::text()`.
 
 ---
 

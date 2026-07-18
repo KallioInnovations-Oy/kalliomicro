@@ -572,7 +572,7 @@ class QueryBuilder
     public function count(string $column = '*'): int
     {
         $column = $this->validateIdentifier($column);
-        $this->columns = [new RawExpression("COUNT({$column}) as aggregate")];
+        $this->columns = [new RawExpression("COUNT(" . $this->connection->quoteIdentifier($column) . ") as aggregate")];
         return (int) ($this->first()['aggregate'] ?? 0);
     }
 
@@ -582,7 +582,7 @@ class QueryBuilder
     public function sum(string $column): float
     {
         $column = $this->validateIdentifier($column);
-        $this->columns = [new RawExpression("SUM({$column}) as aggregate")];
+        $this->columns = [new RawExpression("SUM(" . $this->connection->quoteIdentifier($column) . ") as aggregate")];
         return (float) ($this->first()['aggregate'] ?? 0);
     }
 
@@ -592,7 +592,7 @@ class QueryBuilder
     public function avg(string $column): float
     {
         $column = $this->validateIdentifier($column);
-        $this->columns = [new RawExpression("AVG({$column}) as aggregate")];
+        $this->columns = [new RawExpression("AVG(" . $this->connection->quoteIdentifier($column) . ") as aggregate")];
         return (float) ($this->first()['aggregate'] ?? 0);
     }
 
@@ -602,7 +602,7 @@ class QueryBuilder
     public function min(string $column): mixed
     {
         $column = $this->validateIdentifier($column);
-        $this->columns = [new RawExpression("MIN({$column}) as aggregate")];
+        $this->columns = [new RawExpression("MIN(" . $this->connection->quoteIdentifier($column) . ") as aggregate")];
         return $this->first()['aggregate'] ?? null;
     }
 
@@ -612,7 +612,7 @@ class QueryBuilder
     public function max(string $column): mixed
     {
         $column = $this->validateIdentifier($column);
-        $this->columns = [new RawExpression("MAX({$column}) as aggregate")];
+        $this->columns = [new RawExpression("MAX(" . $this->connection->quoteIdentifier($column) . ") as aggregate")];
         return $this->first()['aggregate'] ?? null;
     }
 
@@ -719,8 +719,12 @@ class QueryBuilder
     public function increment(string $column, int $amount = 1): int
     {
         $column = $this->validateIdentifier($column);
+
+        // Quoted on the right-hand side too: validation only proves the shape
+        // is an identifier, it does not make a reserved word like `order` or
+        // `key` legal unquoted.
         return $this->update([
-            $column => new RawExpression("{$column} + {$amount}"),
+            $column => new RawExpression($this->connection->quoteIdentifier($column) . " + {$amount}"),
         ]);
     }
 
@@ -731,7 +735,7 @@ class QueryBuilder
     {
         $column = $this->validateIdentifier($column);
         return $this->update([
-            $column => new RawExpression("{$column} - {$amount}"),
+            $column => new RawExpression($this->connection->quoteIdentifier($column) . " - {$amount}"),
         ]);
     }
 

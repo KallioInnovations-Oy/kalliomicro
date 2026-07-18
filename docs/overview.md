@@ -2,7 +2,7 @@
 
 > Sources: `src/Core/`, `src/Support/`, `public/index.php`, `console`, `config/`, `composer.json`.
 
-KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.1.0'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
+KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.0'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
 
 ## Design philosophy
 
@@ -50,6 +50,7 @@ Resolution rules:
 - Closure bindings are invoked as `$concrete($this, $parameters)`; string bindings and unbound classes are reflection-built. Constructor params resolve in order: explicit `$parameters` by name → typed class dependency (recursive `make()`) → default value → `null` for nullable → `RuntimeException`.
 - **Unbound, non-singleton classes are built fresh on every `make()`** — only `singleton()` bindings (and `instance()`) are cached.
 - `has()` returns `false` for classes that are merely autowirable but unbound.
+- **Re-binding wins over anything already resolved:** `bind()`/`singleton()` drop the cached instance for that abstract (and `bind()` also clears the singleton flag, downgrading to fresh-per-`make()`), so an override registered after a resolve takes effect instead of being silently ignored. `instance()` likewise overwrites — the ordering of registrations no longer decides which implementation you get.
 
 `KallioMicro\Core\Application` extends the container and adds: path helpers (`basePath`, `configPath`, `publicPath`, `resourcePath`, `storagePath`), a static instance accessor (used by the `app()` helper), and the HTTP kernel (`handle()`, `run()`, global middleware).
 
@@ -63,7 +64,7 @@ The `Application` constructor self-registers five core singletons with string al
 
 Two layers, with a hard rule between them:
 
-1. **`.env` → `env()`** — `KallioMicro\Support\DotEnv` parses `.env` at the repo root (`safeLoad()` — a missing file is fine; `load()` throws) into `$_ENV`/`putenv` without overwriting existing values. Values are stored as **strings**; type coercion (`'true'` → `true`, `'false'` → `false`, `'null'` → `null`, `'empty'` → `''`, parenthesized variants too) happens in the `env()` *helper*, not the loader. `required([...])` throws when listed keys are absent.
+1. **`.env` → `env()`** — `KallioMicro\Support\DotEnv` parses `.env` at the repo root (`safeLoad()` — a missing file is fine; `load()` throws) into `$_ENV`/`putenv` without overwriting existing values. Values are stored as **strings**; type coercion (`'true'` → `true`; `'false'`, `'off'`, `'no'`, `'disabled'` → `false`; `'null'` → `null`; `'empty'` → `''`; case-insensitive, parenthesized variants too) happens in the `env()` *helper*, not the loader. The extra negative words matter: an uncoerced `'off'` is a non-empty — therefore truthy — string, so `APP_DEBUG=off` would enable debug. Positive words other than `true` (`on`, `yes`) are **not** coerced; they stay truthy strings. `required([...])` throws when listed keys are absent.
 
    Quoted values may carry an inline comment (`KEY="value"  # note`): the parser locates the closing quote rather than checking whether the line ends with one, so a value is multiline only when its quote genuinely does not close on that line. An **unterminated quote raises** — previously it absorbed every following line and discarded the rest of the file with no error, which silently booted the app in debug mode against whatever database `config/` defaulted to. There is no variable interpolation: `KEY="${OTHER}"` stores the literal `${OTHER}`.
 2. **`config/*.php` → `config()`** — `KallioMicro\Core\Config` eagerly `require`s every `config/*.php`; the file basename is the top-level key and dot notation reads into it (`config('app.debug')`). Also implements `ArrayAccess`.
@@ -116,7 +117,7 @@ Global functions (each guarded by `function_exists`):
 
 | Helper | Behavior |
 |---|---|
-| `env($key, $default)` | `$_ENV`/`getenv` with true/false/null/empty coercion — **config files only** |
+| `env($key, $default)` | `$_ENV`/`getenv` with true/false/off/no/disabled/null/empty coercion — **config files only** |
 | `app($abstract = null)` | Application instance, or `make($abstract)` |
 | `config($key, $default)` | Dot-notation config read |
 | `view($template, $data)` | Render a template to string |

@@ -36,7 +36,11 @@ class ProfileMiddleware extends Middleware
 
         $userProfileId = $this->session->getProfileId();
 
-        if (!in_array($userProfileId, $this->allowedProfiles)) {
+        // Strict: a session with no profile id gives null, and loose
+        // in_array(null, [0]) is true — ProfileMiddleware($session, 0) would
+        // admit every authenticated user whose session lacks profile_id.
+        // With ===, a missing profile id matches no allowed id and fails closed.
+        if (!in_array($userProfileId, $this->allowedProfiles, true)) {
             if ($request->wantsJson()) {
                 return ApiResponse::forbidden('Access denied for your profile level')->toResponse();
             }

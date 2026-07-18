@@ -123,7 +123,12 @@ abstract class Controller
     }
 
     /**
-     * Render a partial/component
+     * Render a partial/component — no layout, whatever the template asks for
+     *
+     * This is the documented way to build modal content, so it must ignore
+     * extends(): rendering through render() wrapped a template that called
+     * extends() in the full page layout and injected a whole <!DOCTYPE html>
+     * document into the modal body.
      *
      * @param array<string, mixed> $data
      */
@@ -133,7 +138,7 @@ abstract class Controller
             throw new \RuntimeException('View engine not configured');
         }
 
-        return $this->view->render($template, $this->prepareViewData($data));
+        return $this->view->partial($template, $this->prepareViewData($data));
     }
 
     /**

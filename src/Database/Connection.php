@@ -328,6 +328,13 @@ class Connection
     /**
      * Execute a callback within a transaction
      *
+     * Dispatches through $this->beginTransaction()/commit()/rollback() rather
+     * than reaching for the PDO handle directly. That indirection is CONTRACT,
+     * not incidental: it is what lets a Connection subclass implement savepoint
+     * nesting (a named construction seam in docs/conventions.md). Inlining
+     * $this->getPdo()->beginTransaction() here would silently break every such
+     * subclass.
+     *
      * @template T
      * @param callable(): T $callback
      * @return T
@@ -341,7 +348,20 @@ class Connection
             $this->commit();
             return $result;
         } catch (\Throwable $e) {
-            $this->rollback();
+            // A failing commit() leaves no active transaction, so rollback()
+            // throws its own "no active transaction" — which would REPLACE the
+            // real cause and report the wrong failure. Keep the original.
+            try {
+                $this->rollback();
+            } catch (\Throwable $rollbackFailure) {
+                throw new RuntimeException(
+                    'Transaction failed and could not be rolled back: ' . $e->getMessage()
+                    . ' (rollback also failed: ' . $rollbackFailure->getMessage() . ')',
+                    (int) $e->getCode(),
+                    $e
+                );
+            }
+
             throw $e;
         }
     }
@@ -406,6 +426,19 @@ class Connection
     {
         foreach ($bindings as $key => $value) {
             $param = is_int($key) ? $key + 1 : ":{$key}";
+
+            // An array or object binding used to reach PDO and stringify to
+            // the literal 'Array' (with a notice), writing that into the
+            // column. Almost always a forgotten whereIn() or a mis-shaped
+            // payload — say so rather than persisting nonsense.
+            if (!is_scalar($value) && $value !== null) {
+                throw new InvalidArgumentException(sprintf(
+                    'Binding [%s] must be scalar or null, %s given. '
+                    . 'Use whereIn() for a list of values.',
+                    is_int($key) ? "#{$param}" : $key,
+                    get_debug_type($value)
+                ));
+            }
 
             $type = match (true) {
                 is_int($value) => PDO::PARAM_INT,

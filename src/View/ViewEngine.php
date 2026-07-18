@@ -62,7 +62,13 @@ class ViewEngine
 
         // Each page render starts with a clean slate — otherwise sections
         // captured by an earlier render (e.g. 'scripts') leak into this one.
+        // currentSection/currentLayout are reset for a sharper reason: a render
+        // that threw mid-template never reached endSection() and never cleared
+        // its layout, so this singleton would wrap the next, unrelated page in
+        // a layout it never requested and mis-close the next section.
         $this->sections = [];
+        $this->currentSection = null;
+        $this->currentLayout = null;
 
         // Merge shared data
         $data = array_merge($this->shared, $data);
@@ -178,16 +184,19 @@ class ViewEngine
         // Convert dot notation to path
         $template = str_replace('.', '/', $template);
 
+        // is_file(), not file_exists(): a directory exists, so exists('assessments')
+        // answered true for the folder resources/views/assessments and the render
+        // then failed inside include() instead of with "View not found".
         foreach ($this->extensions as $ext) {
             $path = $this->viewPath . '/' . $template . $ext;
-            if (file_exists($path)) {
+            if (is_file($path) && is_readable($path)) {
                 return $path;
             }
         }
 
         // Try without extension
         $path = $this->viewPath . '/' . $template;
-        if (file_exists($path)) {
+        if (is_file($path) && is_readable($path)) {
             return $path;
         }
 
@@ -201,11 +210,14 @@ class ViewEngine
      */
     private function renderFile(string $__path, array $__data): string
     {
+        // Declared before extract() so EXTR_SKIP protects it like the parameters.
+        $__level = ob_get_level();
+
         // Extract data to local scope. EXTR_SKIP is required, not cosmetic:
         // the default EXTR_OVERWRITE lets a data key named '__path' replace the
         // include target below with an arbitrary file. Since $__path/$__data
         // are parameters they already exist, so EXTR_SKIP leaves them intact
-        // and those two key names are silently unavailable to templates.
+        // and those key names are silently unavailable to templates.
         extract($__data, EXTR_SKIP);
 
         // Make view engine available in templates (after extract — not clobberable)
@@ -218,7 +230,14 @@ class ViewEngine
             // local, so the include target holds even if the guard above moves.
             include func_get_arg(0);
         } catch (\Throwable $e) {
-            ob_end_clean();
+            // A template that threw inside section() left that buffer open too,
+            // so a single ob_end_clean() discards the section and leaves this
+            // method's own buffer behind — PHP then flushes the aborted page at
+            // shutdown, ahead of the error page. Unwind to the entry depth.
+            while (ob_get_level() > $__level) {
+                ob_end_clean();
+            }
+
             throw $e;
         }
 
@@ -280,11 +299,35 @@ class ViewEngine
      */
     public function e(mixed $value): string
     {
+        return self::escape($value);
+    }
+
+    /**
+     * The single implementation behind both `$view->e()` and the global `e()`
+     * helper, which docs/views.md presents as interchangeable — they drifted
+     * apart (one returned 'Array', the other raised a TypeError) precisely
+     * because each had its own copy of this logic.
+     *
+     * Non-stringable values are rejected rather than coerced: `e($row)` printing
+     * "Array" is a bug that reaches production looking like content, and the
+     * escaping helper is the wrong place to guess what the template meant.
+     */
+    public static function escape(mixed $value): string
+    {
         if ($value === null) {
             return '';
         }
 
-        return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        if (!is_scalar($value) && !$value instanceof \Stringable) {
+            throw new \InvalidArgumentException(
+                'e() expects a string, scalar, Stringable or null; ' . get_debug_type($value) . ' given.'
+            );
+        }
+
+        // ENT_SUBSTITUTE: without it a single invalid UTF-8 byte (legacy
+        // imports are full of them) makes htmlspecialchars return '', blanking
+        // the whole field instead of the one bad character.
+        return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE, 'UTF-8');
     }
 
     /**
@@ -292,7 +335,15 @@ class ViewEngine
      */
     public function js(mixed $value): string
     {
-        return json_encode($value, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+        // JSON_INVALID_UTF8_SUBSTITUTE for the same reason as ENT_SUBSTITUTE
+        // above — without it json_encode returns false on one bad byte, which
+        // this method's string return type turned into an unreadable "Return
+        // value must be of type string" TypeError mid-template. THROW_ON_ERROR
+        // keeps the remaining failures (recursion, INF/NAN) loud but named.
+        return json_encode(
+            $value,
+            JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR
+        );
     }
 
     /**
@@ -300,7 +351,7 @@ class ViewEngine
      */
     public function attr(mixed $value): string
     {
-        return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        return self::escape($value);
     }
 
     /**

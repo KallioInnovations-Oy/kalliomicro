@@ -201,56 +201,72 @@ class ScheduleRunCommand extends Command
      */
     private function matchesField(string $field, int $value): bool
     {
-        // Wildcard
-        if ($field === '*') {
-            return true;
-        }
+        // The list separator splits FIRST. Testing '/' or '-' against the
+        // whole field made a mixed field never reach the list branch:
+        // explode('-', '1,3-5', 2) yields start '1,3' → 1, so '0 1,3-5 * * *'
+        // was due at 02:00 and '0 1-5,10 * * *' was not due at 10:00 — a task
+        // running at a time it was never scheduled for.
+        $elements = explode(',', $field);
 
-        // Exact match
-        if (ctype_digit($field)) {
-            return (int) $field === $value;
-        }
+        // Validate every element before matching any: docs/console.md promises
+        // a field outside the grammar silently isn't due rather than crashing,
+        // and one bad element must not be masked by a good sibling matching
+        // ('5,*/0' stays never-due, as documented). The step is required
+        // non-zero here, which is also what keeps matchesElement()'s modulo
+        // away from a DivisionByZeroError that would kill the whole tick.
+        $step = '(?:/0*[1-9]\d*)';
 
-        // Step: */5 or 0-30/5 — must be checked before the plain range branch,
-        // or '0-30/5' is misread as the range 0-30 and the step is ignored
-        if (str_contains($field, '/')) {
-            [$range, $step] = explode('/', $field, 2);
-            $step = (int) $step;
-
-            // '*/0' or a non-numeric step must not take down the whole tick
-            // with a DivisionByZeroError — a malformed field is never due.
-            if ($step <= 0) {
+        foreach ($elements as $element) {
+            if (preg_match("#^(?:\*{$step}?|\d+(?:-\d+{$step}?)?)$#", $element) !== 1) {
                 return false;
             }
-
-            if ($range === '*') {
-                return $value % $step === 0;
-            }
-
-            if (str_contains($range, '-')) {
-                [$start, $end] = explode('-', $range, 2);
-                if ($value < (int) $start || $value > (int) $end) {
-                    return false;
-                }
-                return ($value - (int) $start) % $step === 0;
-            }
-
-            return false;
         }
 
-        // Range: 1-5
-        if (str_contains($field, '-')) {
-            [$start, $end] = explode('-', $field, 2);
-            return $value >= (int) $start && $value <= (int) $end;
-        }
-
-        // List: 1,3,5
-        if (str_contains($field, ',')) {
-            $values = array_map('intval', explode(',', $field));
-            return in_array($value, $values, true);
+        foreach ($elements as $element) {
+            if ($this->matchesElement($element, $value)) {
+                return true;
+            }
         }
 
         return false;
+    }
+
+    /**
+     * Match one comma-free cron element: '*', '5', 'a-b', '*' + '/n', 'a-b/n'.
+     *
+     * Only ever called on elements matchesField() has already validated,
+     * so the step is known to be a positive integer.
+     */
+    private function matchesElement(string $element, int $value): bool
+    {
+        if ($element === '*') {
+            return true;
+        }
+
+        if (ctype_digit($element)) {
+            return (int) $element === $value;
+        }
+
+        $step = 1;
+
+        // Step is stripped before the range is read, or '0-30/5' is misread
+        // as the range '0-30' with the step silently ignored.
+        if (str_contains($element, '/')) {
+            [$element, $stepPart] = explode('/', $element, 2);
+            $step = (int) $stepPart;
+        }
+
+        if ($element === '*') {
+            return $value % $step === 0;
+        }
+
+        [$start, $end] = explode('-', $element, 2);
+
+        if ($value < (int) $start || $value > (int) $end) {
+            return false;
+        }
+
+        return ($value - (int) $start) % $step === 0;
     }
 
     /**

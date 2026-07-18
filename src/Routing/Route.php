@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KallioMicro\Routing;
 
 use Closure;
+use InvalidArgumentException;
 
 /**
  * Route - Represents a single route definition
@@ -48,31 +49,37 @@ class Route
      */
     private function compilePattern(string $path): string
     {
-        // Escape forward slashes
-        $pattern = preg_replace('/\//', '\\/', $path);
-
-        // Convert {param} to named capture groups
-        $pattern = preg_replace_callback(
-            '/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/',
-            function ($matches) {
-                $param = $matches[1];
-                // Use custom pattern if defined, otherwise default to non-slash characters
-                $paramPattern = $this->parameterPatterns[$param] ?? '[^\/]+';
-                return "(?P<{$param}>{$paramPattern})";
-            },
-            $pattern
+        // Split the path on {param} / {param?} placeholders, keeping the
+        // placeholders as delimiters, so literal text can be preg_quote()d and
+        // only the placeholders become regex. Escaping just the slashes let
+        // route metacharacters through: "/files/report.pdf" also matched
+        // "/files/reportXpdf", and a path with an unbalanced "(" compiled to an
+        // invalid pattern — permanently unmatchable, and preg_match() warned on
+        // every single request because every dispatch re-tests every route.
+        $parts = preg_split(
+            '/(\{[a-zA-Z_][a-zA-Z0-9_]*\??\})/',
+            $path,
+            -1,
+            PREG_SPLIT_DELIM_CAPTURE
         );
 
-        // Convert {param?} to optional named capture groups
-        $pattern = preg_replace_callback(
-            '/\{([a-zA-Z_][a-zA-Z0-9_]*)\?\}/',
-            function ($matches) {
-                $param = $matches[1];
-                $paramPattern = $this->parameterPatterns[$param] ?? '[^\/]+';
-                return "(?:(?P<{$param}>{$paramPattern}))?";
-            },
-            $pattern
-        );
+        $pattern = '';
+
+        foreach ($parts as $part) {
+            if (preg_match('/^\{([a-zA-Z_][a-zA-Z0-9_]*)(\?)?\}$/', $part, $matches) !== 1) {
+                $pattern .= preg_quote($part, '/');
+                continue;
+            }
+
+            $param = $matches[1];
+            // Use custom pattern if defined, otherwise default to non-slash characters
+            $paramPattern = $this->parameterPatterns[$param] ?? '[^\/]+';
+
+            // "{param?}" makes the value optional, not its separator slash
+            $pattern .= isset($matches[2])
+                ? "(?:(?P<{$param}>{$paramPattern}))?"
+                : "(?P<{$param}>{$paramPattern})";
+        }
 
         return '/^' . $pattern . '\/?$/';
     }
@@ -111,11 +118,16 @@ class Route
         $params = [];
         foreach ($matches as $key => $value) {
             if (is_string($key) && $value !== '') {
-                $params[$key] = $value;
+                // Captured groups come straight off the raw request path, so a
+                // percent-encoded segment reached handlers as the literal
+                // "a%2Fb" instead of the "a/b" the client actually sent —
+                // every lookup by that parameter missed.
+                $params[$key] = rawurldecode($value);
             }
         }
 
-        // Apply defaults for missing optional parameters
+        // Apply defaults for missing optional parameters (author-supplied
+        // literals, never encoded — decoding them would mangle a legitimate %)
         foreach ($this->defaults as $key => $default) {
             if (!isset($params[$key])) {
                 $params[$key] = $default;
@@ -129,18 +141,38 @@ class Route
      * Generate URL for this route with given parameters
      *
      * @param array<string, string> $params
+     * @throws InvalidArgumentException when a required {param} has no value
      */
     public function generateUrl(array $params = []): string
     {
         $url = $this->path;
 
         foreach ($params as $key => $value) {
-            $url = str_replace("{{$key}}", (string) $value, $url);
-            $url = str_replace("{{$key}?}", (string) $value, $url);
+            // Values are single path segments and must be encoded as such:
+            // unencoded, an id of "1?x=2#y" grafted a query string and fragment
+            // onto the generated URL, and "a/b" invented an extra path segment,
+            // so a link could point somewhere the route never declared.
+            $url = str_replace(
+                ["{{$key}}", "{{$key}?}"],
+                rawurlencode((string) $value),
+                $url
+            );
         }
 
         // Remove unfilled optional parameters
         $url = preg_replace('/\{[a-zA-Z_][a-zA-Z0-9_]*\?\}/', '', $url);
+
+        // A required parameter left unfilled used to ship the literal
+        // "/users/{id}" into an href — a dead link discovered by a user, not by
+        // the developer. Report the boundary at generation time instead.
+        if (preg_match('/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/', $url, $missing) === 1) {
+            throw new InvalidArgumentException(sprintf(
+                'Route [%s] requires parameter [%s]; given: %s',
+                $this->path,
+                $missing[1],
+                $params === [] ? 'none' : implode(', ', array_keys($params))
+            ));
+        }
 
         // Clean up double slashes
         $url = preg_replace('/\/+/', '/', $url);
