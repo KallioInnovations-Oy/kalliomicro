@@ -64,6 +64,8 @@ The `Application` constructor self-registers five core singletons with string al
 Two layers, with a hard rule between them:
 
 1. **`.env` → `env()`** — `KallioMicro\Support\DotEnv` parses `.env` at the repo root (`safeLoad()` — a missing file is fine; `load()` throws) into `$_ENV`/`putenv` without overwriting existing values. Values are stored as **strings**; type coercion (`'true'` → `true`, `'false'` → `false`, `'null'` → `null`, `'empty'` → `''`, parenthesized variants too) happens in the `env()` *helper*, not the loader. `required([...])` throws when listed keys are absent.
+
+   Quoted values may carry an inline comment (`KEY="value"  # note`): the parser locates the closing quote rather than checking whether the line ends with one, so a value is multiline only when its quote genuinely does not close on that line. An **unterminated quote raises** — previously it absorbed every following line and discarded the rest of the file with no error, which silently booted the app in debug mode against whatever database `config/` defaulted to. There is no variable interpolation: `KEY="${OTHER}"` stores the literal `${OTHER}`.
 2. **`config/*.php` → `config()`** — `KallioMicro\Core\Config` eagerly `require`s every `config/*.php`; the file basename is the top-level key and dot notation reads into it (`config('app.debug')`). Also implements `ArrayAccess`.
 
 **Rule: `env()` may only be called inside `config/*.php`** (exception: entry-script crash handlers, where config may not be loadable). Application code reads `config()`.
@@ -101,6 +103,10 @@ Guards `PHP_SAPI === 'cli'`, defines `KALLIOMICRO_BASE_PATH`, locates the compos
 Registers exception/error/shutdown handlers. Rendering: CLI → colored STDERR (exit 1); JSON-wanting requests → JSON (debug adds exception/file/line/trace); web → full debug page in debug mode, generic error page otherwise. Paths listed via `setHiddenPaths()` are redacted in traces. Critical errors (`Error`, `PDOException`, `RuntimeException`) can notify Teams via `Communicator` when `notifyOnCritical` is enabled.
 
 Status-code mapping (`getHttpCode`, public): `HttpException` → its status code; any exception whose `code` is an int in 400–599 → that status (`throw new RuntimeException('...', 403)` renders as 403); `InvalidArgumentException` → 400; everything else → 500. `HttpException` remains the preferred way to abort with a specific status.
+
+**It is the only error renderer.** `Application::handleException()` resolves `ExceptionHandler` from the container and delegates, so a web request and the registered global handler cannot disagree about escaping, trace contents, or what a production response is allowed to say. Bind your own instance (custom renderer, hidden paths, a logger) before the first request to replace the default; `Application::boot()` only registers one if the binding is unclaimed.
+
+**Survivability**, because an error page that crashes is worse than useless: the error handler is registered with a level mask, so a warning raised *inside* it — the classic being `file_put_contents` failing when the log directory is unwritable — no longer becomes an `ErrorException` that escapes and destroys the original error. A re-entrancy guard stops `handleShutdown()` re-entering on a fatal the handler itself produced (which printed every crash twice), logging and notification failures are swallowed rather than replacing the exception being reported, and headers are only emitted when `headers_sent()` is false, so an exception raised mid-render appends to the partial output instead of cascading.
 
 ---
 

@@ -42,8 +42,10 @@ interface OAuthProviderInterface extends AuthProviderInterface { getAuthorizatio
 
 DB username/password against `core_users` (table/columns configurable: `table`, `username_column`, `password_column`, `active_column`). Hashing: `password_hash` with `PASSWORD_DEFAULT`, auto-rehash on login. Hardened:
 
-- Unknown user → `password_verify` against a dummy bcrypt hash before the generic `Invalid credentials` (timing-attack mitigation).
+- Unknown user → `password_verify` against a dummy hash generated from the **configured** `hash_algo` before the generic `Invalid credentials`. Generating it (rather than hardcoding one) is what makes the mitigation work: a fixed cost-10 bcrypt string against `PASSWORD_DEFAULT`'s cost 12 measured 46ms versus 184ms, which is a trivially separable remote user-enumeration oracle.
+- Every failure path performs the password verification, including the disabled-account path — it used to return before `password_verify` ran at all (~0ms), so response time alone separated disabled / nonexistent / wrong-password even when all three returned the same message.
 - Disabled accounts report `Account is disabled`; the password column is stripped from the returned user array.
+- **The `active_column` check fails closed.** A row missing the configured column entirely — a typo'd config name, or a `SELECT` that omitted it — is treated as disabled, not as unchecked. Values are read as booleans: `1`/`true`/`on`/`yes`/`Y`/`T` mean active; `0`/`'0'`/`false`/`no`/`off`/`N`/`F`/`''`/`NULL` and anything else mean disabled. Previously the check was skipped whenever the value was `NULL` or the key was absent, so a disabled account authenticated, and `'N'` passed as a truthy string.
 - Public utilities: `hashPassword(string): string`, `verifyPassword(string, string): bool`.
 
 ### Entra ID (`EntraIdAuthProvider`)

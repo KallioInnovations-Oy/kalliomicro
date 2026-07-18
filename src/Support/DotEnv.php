@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace KallioMicro\Support;
 
+use RuntimeException;
+
 /**
  * DotEnv - Native .env file parser
  *
@@ -15,9 +17,21 @@ namespace KallioMicro\Support;
  * - KEY="quoted value"
  * - KEY='single quoted value'
  * - KEY=value # inline comments
+ * - KEY="quoted value" # inline comments after a closing quote
  * - # full line comments
  * - Empty lines are ignored
  * - Multiline values with quotes
+ *
+ * Inline comments and multiline values coexist by locating the closing quote
+ * rather than testing whether the line ends with one: a quoted value is
+ * multiline only when its quote does not close on the same line, and anything
+ * following the closing quote is discarded as a comment. An unterminated quote
+ * at end of file raises — it previously swallowed every remaining line, so a
+ * stray comment after a quoted value silently discarded the rest of the file
+ * (APP_DEBUG and DB credentials included) with no error.
+ *
+ * Not supported: variable interpolation. `KEY="${OTHER}"` stores the literal
+ * text `${OTHER}`.
  *
  * Values are always stored as strings ($_ENV/putenv are string-only).
  * Type coercion of the special values true/false/null/empty (with or
@@ -149,6 +163,44 @@ class DotEnv
                 $this->variables[$key] = $value;
             }
         }
+
+        // A quote left open at end of file means every line after it was
+        // absorbed into that value and is now missing. Failing loudly is the
+        // only safe option: silently, the app boots with a truthy APP_DEBUG
+        // and whatever database defaults happen to be in config/.
+        if ($multilineKey !== null) {
+            throw new RuntimeException(sprintf(
+                'Unterminated %s quote in %s: the value of %s is never closed, '
+                . 'so every later variable in the file was discarded.',
+                $multilineQuote === '"' ? 'double' : 'single',
+                $this->path . DIRECTORY_SEPARATOR . '.env',
+                $multilineKey
+            ));
+        }
+    }
+
+    /**
+     * Find the index of the quote that closes a quoted value, or null
+     *
+     * Backslash escapes are honoured inside double quotes only, matching
+     * processEscapes().
+     */
+    private function findClosingQuote(string $value, string $quote): ?int
+    {
+        $length = strlen($value);
+
+        for ($i = 1; $i < $length; $i++) {
+            if ($quote === '"' && $value[$i] === '\\') {
+                $i++;
+                continue;
+            }
+
+            if ($value[$i] === $quote) {
+                return $i;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -182,10 +234,15 @@ class DotEnv
         $firstChar = $value[0];
 
         if ($firstChar === '"' || $firstChar === "'") {
-            // Check if it's a complete quoted string
-            if (strlen($value) > 1 && str_ends_with($value, $firstChar)) {
-                // Remove quotes and handle escapes
-                $value = substr($value, 1, -1);
+            // Locate the closing quote rather than testing whether the line
+            // ends with one. `KEY="value"  # comment` ends with 't', so the
+            // old test treated it as the start of a multiline value and
+            // absorbed the rest of the file.
+            $closing = $this->findClosingQuote($value, $firstChar);
+
+            if ($closing !== null) {
+                // Anything after the closing quote is an inline comment
+                $value = substr($value, 1, $closing - 1);
 
                 if ($firstChar === '"') {
                     // Process escape sequences in double quotes
@@ -195,7 +252,7 @@ class DotEnv
                 return $value;
             }
 
-            // Start of multiline value
+            // Quote does not close on this line — start of a multiline value
             $multilineKey = $key;
             $multilineQuote = $firstChar;
             $multilineValue = substr($value, 1);

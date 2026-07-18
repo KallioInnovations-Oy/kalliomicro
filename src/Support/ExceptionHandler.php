@@ -30,6 +30,9 @@ class ExceptionHandler
     /** @var callable|null Custom renderer */
     private $customRenderer = null;
 
+    /** Guards against handling an error raised while handling an error */
+    private bool $handling = false;
+
     public function __construct(
         ?Logger $logger = null,
         ?Communicator $communicator = null,
@@ -48,7 +51,15 @@ class ExceptionHandler
     public function register(): self
     {
         set_exception_handler([$this, 'handleException']);
-        set_error_handler([$this, 'handleError']);
+
+        // Masked deliberately. With no mask, any reportable diagnostic becomes
+        // an ErrorException — including one raised inside this handler, e.g.
+        // the file_put_contents warning from Logger when the log directory is
+        // unwritable. That escaped uncaught and destroyed the original error.
+        // Warnings and notices are still logged by PHP; they just no longer
+        // hijack control flow.
+        set_error_handler([$this, 'handleError'], E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_USER_DEPRECATED);
+
         register_shutdown_function([$this, 'handleShutdown']);
 
         return $this;
@@ -70,15 +81,35 @@ class ExceptionHandler
      */
     public function handleException(\Throwable $e): void
     {
-        $this->logException($e);
-        $this->notifyIfCritical($e);
+        // Re-entrancy guard. Without it, an error raised while handling an
+        // error recurses: handleShutdown() re-enters on the fatal this method
+        // just produced, printing the same crash twice. Exactly when the error
+        // page matters most — disk full, bad permissions, partial output — the
+        // user got a raw PHP fatal with absolute paths instead.
+        if ($this->handling) {
+            return;
+        }
 
-        if ($this->isCli()) {
-            $this->renderForCli($e);
-        } elseif ($this->wantsJson()) {
-            $this->renderForJson($e);
-        } else {
-            $this->renderForHtml($e);
+        $this->handling = true;
+
+        try {
+            // Reporting must never be able to replace the error being reported.
+            try {
+                $this->logException($e);
+                $this->notifyIfCritical($e);
+            } catch (\Throwable) {
+                // Nowhere left to report it to.
+            }
+
+            if ($this->isCli()) {
+                $this->renderForCli($e);
+            } elseif ($this->wantsJson()) {
+                $this->renderForJson($e);
+            } else {
+                $this->renderForHtml($e);
+            }
+        } finally {
+            $this->handling = false;
         }
     }
 
@@ -370,12 +401,19 @@ HTML;
      */
     private function sendResponse(Response $response): void
     {
-        http_response_code($response->getStatusCode());
+        // An exception raised mid-render leaves output already flushed, in
+        // which case the status and headers are gone and attempting them just
+        // emits "headers already sent" — which, before the level mask above,
+        // became another ErrorException inside this handler. Emit the body
+        // anyway; a partial page with an error appended beats a blank one.
+        if (!headers_sent()) {
+            http_response_code($response->getStatusCode());
 
-        // Response stores headers as name => string[] (multi-value)
-        foreach ($response->getHeaders() as $name => $values) {
-            foreach ((array) $values as $value) {
-                header("{$name}: {$value}", false);
+            // Response stores headers as name => string[] (multi-value)
+            foreach ($response->getHeaders() as $name => $values) {
+                foreach ((array) $values as $value) {
+                    header("{$name}: {$value}", false);
+                }
             }
         }
 

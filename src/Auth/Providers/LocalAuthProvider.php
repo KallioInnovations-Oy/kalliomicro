@@ -57,20 +57,31 @@ class LocalAuthProvider implements AuthProviderInterface
         $user = $this->findUser($username);
 
         if ($user === null) {
-            // Use constant-time comparison even for non-existent users (prevent timing attacks)
-            password_verify($password, '$2y$10$dummyhashtopreventtimingattacks');
+            // Burn the same work a real verify costs, so response time does not
+            // reveal whether the account exists. The hash must be generated
+            // from the configured algorithm: a hardcoded cost-10 bcrypt string
+            // against PASSWORD_DEFAULT's cost 12 measured 46ms vs 184ms here,
+            // which is a trivially separable remote oracle.
+            password_verify($password, $this->dummyHash());
             return AuthResult::failure('Invalid credentials');
         }
 
-        // Check if user is active
+        // Verify password BEFORE the active check, so a disabled account costs
+        // the same as a wrong password. Returning early on inactive skipped
+        // password_verify entirely (~0ms), separating disabled / nonexistent /
+        // wrong-password by response time alone.
+        $passwordColumn = $this->config['password_column'];
+        $passwordValid = password_verify($password, (string) ($user[$passwordColumn] ?? ''));
+
+        // Fails CLOSED: a missing key or a null value used to make isset() false
+        // and skip the check entirely, authenticating a disabled account. 'N'
+        // and 'false' are truthy strings and passed for the same reason.
         $activeColumn = $this->config['active_column'];
-        if (isset($user[$activeColumn]) && !$user[$activeColumn]) {
+        if (!$this->isActive($user, $activeColumn)) {
             return AuthResult::failure('Account is disabled');
         }
 
-        // Verify password
-        $passwordColumn = $this->config['password_column'];
-        if (!password_verify($password, $user[$passwordColumn] ?? '')) {
+        if (!$passwordValid) {
             return AuthResult::failure('Invalid credentials');
         }
 
@@ -83,6 +94,56 @@ class LocalAuthProvider implements AuthProviderInterface
         unset($user[$passwordColumn]);
 
         return AuthResult::success($user, 'Login successful');
+    }
+
+    /**
+     * Decide whether a user row is active
+     *
+     * Fails closed on absence: if the configured active_column is not present
+     * in the row at all — a typo'd config name, or a SELECT that omitted it —
+     * the account is treated as disabled rather than silently unchecked.
+     * Values are interpreted as booleans. Single-letter Y/N and T/F flags are
+     * handled explicitly because FILTER_VALIDATE_BOOLEAN does not know them
+     * and would read a perfectly active 'Y' as disabled; beyond those, the
+     * usual 1/true/on/yes spellings mean active and everything else — 0, '0',
+     * 'N', 'false', '' and NULL — means disabled.
+     *
+     * @param array<string, mixed> $user
+     */
+    private function isActive(array $user, string $activeColumn): bool
+    {
+        if (!array_key_exists($activeColumn, $user)) {
+            return false;
+        }
+
+        $value = $user[$activeColumn];
+
+        if (is_string($value)) {
+            $normalized = strtolower(trim($value));
+
+            if ($normalized === 'y' || $normalized === 't') {
+                return true;
+            }
+
+            if ($normalized === 'n' || $normalized === 'f') {
+                return false;
+            }
+        }
+
+        return filter_var($value, FILTER_VALIDATE_BOOLEAN) === true;
+    }
+
+    /**
+     * A throwaway hash matching the configured algorithm and cost
+     *
+     * Generated once per process. The cost must track the real one or the
+     * unknown-user branch is measurably cheaper than a genuine verify.
+     */
+    private function dummyHash(): string
+    {
+        static $hash = null;
+
+        return $hash ??= password_hash('', $this->config['hash_algo']);
     }
 
     /**
