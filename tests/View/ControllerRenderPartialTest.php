@@ -56,6 +56,14 @@ class ControllerRenderPartialTest extends TestCase
             {
                 return $this->renderPartial($template, $data);
             }
+
+            /**
+             * @param array<string, mixed> $data
+             */
+            public function runRenderToResponse(string $template, string $target, array $data = []): \KallioMicro\Http\ApiResponse
+            {
+                return $this->renderToResponse($template, $target, $data);
+            }
         };
     }
 
@@ -69,5 +77,24 @@ class ControllerRenderPartialTest extends TestCase
     public function testRenderPartialStillRendersOrdinaryPartials(): void
     {
         $this->assertSame('&lt;b&gt;', $this->controller()->runRenderPartial('rows', ['label' => '<b>']));
+    }
+
+    /**
+     * renderToResponse() feeds its output into a DOM replace action, so it has
+     * exactly the same constraint — and it was the second door to the same
+     * bug, left open when 1.2.0 fixed renderPartial().
+     */
+    public function testRenderToResponseDoesNotApplyTheTemplatesLayout(): void
+    {
+        $layoutUser = json_encode($this->controller()->runRenderToResponse('modal', '#target')->getActions());
+        $this->assertStringNotContainsString('DOCTYPE', (string) $layoutUser, 'a whole page document was injected into a DOM target');
+
+        // An ordinary partial — the shape this method is actually for —
+        // still reaches the target intact.
+        $ordinary = json_encode(
+            $this->controller()->runRenderToResponse('rows', '#target', ['label' => 'ROW'])->getActions()
+        );
+        $this->assertStringContainsString('ROW', (string) $ordinary);
+        $this->assertStringContainsString('"target":"#target"', (string) $ordinary);
     }
 }

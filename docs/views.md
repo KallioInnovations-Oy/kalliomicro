@@ -7,7 +7,7 @@
 
 ## ViewEngine
 
-Constructed by the Application as a singleton (alias `'view'`) with `resources/views` as the view path. Template names use dot notation: `assessments.form` → `resources/views/assessments/form.php`. Extensions tried: `.php`, `.html.php`. (The constructor's `$cachePath` parameter is currently unused — templates are plain PHP includes, nothing is compiled or cached.)
+Constructed by the Application as a singleton (alias `'view'`) with `resources/views` as the view path. Template names use dot notation: `assessments.form` → `resources/views/assessments/form.php`. Extensions tried: `.php`, `.html.php`. The constructor takes the view path and nothing else — templates are plain PHP includes, so nothing is compiled and there is no cache path to configure.
 
 ### Render flow and layout inheritance
 

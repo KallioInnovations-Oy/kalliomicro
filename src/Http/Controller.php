@@ -108,18 +108,17 @@ abstract class Controller
     /**
      * Render a view and return as ApiResponse action
      *
+     * Renders as a partial for the same reason renderPartial() does: the output
+     * goes into a DOM target, so a template calling extends() must not drag the
+     * page layout in with it. This used to call render() and was the second
+     * door to the <!DOCTYPE html>-in-a-modal bug fixed in 1.2.0.
+     *
      * @param array<string, mixed> $data
      */
     protected function renderToResponse(string $template, string $target, array $data = []): ApiResponse
     {
-        if ($this->view === null) {
-            throw new \RuntimeException('View engine not configured');
-        }
-
-        $content = $this->view->render($template, $this->prepareViewData($data));
-
         return ApiResponse::success()
-            ->replace($target, $content);
+            ->replace($target, $this->renderPartial($template, $data));
     }
 
     /**

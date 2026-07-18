@@ -18,7 +18,6 @@ use RuntimeException;
 class ViewEngine
 {
     private string $viewPath;
-    private string $cachePath;
 
     /** @var array<string, mixed> */
     private array $shared = [];
@@ -41,10 +40,20 @@ class ViewEngine
 
     private ?string $currentSection = null;
 
-    public function __construct(string $viewPath, string $cachePath = '')
+    /**
+     * There is no cache path parameter
+     *
+     * Templates are plain PHP includes — nothing is compiled, so nothing is
+     * cached. The constructor used to take a $cachePath, store it in a private
+     * property with no accessor, and never read it again: not an extension
+     * point, since a downstream could not reach it either, just write-only
+     * state that made the Application compute a storage path for nothing.
+     * PHP ignores surplus arguments to userland functions, so an existing
+     * `new ViewEngine($views, $cache)` call keeps working.
+     */
+    public function __construct(string $viewPath)
     {
         $this->viewPath = rtrim($viewPath, '/');
-        $this->cachePath = $cachePath ? rtrim($cachePath, '/') : sys_get_temp_dir() . '/meso_views';
 
         if (!is_dir($this->viewPath)) {
             throw new RuntimeException("View path does not exist: {$this->viewPath}");
@@ -429,7 +438,14 @@ class ViewEngine
             return $this->locale;
         }
 
-        return function_exists('config') ? (string) config('app.locale', 'en') : 'en';
+        // Guarded on the container, not on function_exists('config'):
+        // helpers.php is in composer's autoload.files, so config() is defined
+        // the moment the autoloader runs and that test could never be false.
+        // What actually breaks is config() without an Application — it resolves
+        // through app(), so a bare `new ViewEngine($path)` in a script fataled
+        // with "Call to a member function make() on null". app() is used rather
+        // than importing Application so src/View/ stays standalone.
+        return app() !== null ? (string) config('app.locale', 'en') : 'en';
     }
 
     /**
@@ -445,7 +461,7 @@ class ViewEngine
     {
         $langPath = dirname($this->viewPath) . '/lang';
         $locale = $this->getLocale();
-        $fallback = function_exists('config') ? (string) config('app.fallback_locale', 'en') : 'en';
+        $fallback = app() !== null ? (string) config('app.fallback_locale', 'en') : 'en';
 
         $load = static function (string $loc) use ($langPath): array {
             $file = "{$langPath}/{$loc}.json";

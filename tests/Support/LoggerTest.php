@@ -112,6 +112,24 @@ class LoggerTest extends TestCase
         $this->assertStringContainsString('[user:42]', $this->lines()[0]);
     }
 
+    /**
+     * getDefaultLogPath() used to consult a KALLIOMICRO_BASE_PATH constant that
+     * only the console entry script defines — and that script passes an
+     * explicit path, so the branch never ran. The web entry point, the one that
+     * actually reaches this default, never defined it at all. Application owns
+     * the base path, so a relocated src/ no longer sends web logs somewhere
+     * nobody looks.
+     */
+    public function testDefaultLogPathFollowsTheApplicationBasePath(): void
+    {
+        $method = new \ReflectionMethod(Logger::class, 'getDefaultLogPath');
+
+        $this->assertSame(
+            $this->app->storagePath('logs/app.log'),
+            $method->invoke(new Logger())
+        );
+    }
+
     public function testRemainingContextIsStillSerialised(): void
     {
         $this->logger()->error('message', ['order_id' => 7]);

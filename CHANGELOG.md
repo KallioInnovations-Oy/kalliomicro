@@ -7,6 +7,69 @@ newer base.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.2] – 2026-07-18
+
+Removes dead code from `src/`. Standing rule, recorded here because it governs
+future changes: **dead code does not ship unless it is documented framing for an
+extendable feature.** Unreachable branches read as intent — the next maintainer
+assumes they matter and preserves them.
+
+Nothing here changes behaviour for correct code. The removed members had no
+callers anywhere in `src/`, `app/`, `routes/`, `tests/`, `public/` or `console`.
+
+### Removed
+
+- **`Router::$groupMiddleware`** — declared and never written or read; the whole
+  file contained one reference, the declaration. Superseded by
+  `$currentGroupMiddleware`, which is what `group()` saves and restores.
+- **`Router::registerNamed()`** — undocumented public method superseded by the
+  lazy name resolution in `url()`. It was also a trap: a route registered
+  through it landed in `$namedRoutes` but not `$routes`, so it generated URLs
+  for a path the router could never dispatch.
+- **`Middleware::respond()` and `Middleware::next()`** — identity passthroughs
+  (`return $response;`, `return $next($request);`) that no shipped middleware
+  called. The abstract class remains as the `MiddlewareInterface` carrier;
+  extending it was always optional, and `docs/conventions.md` tells downstream
+  middleware to implement the interface instead.
+- **`ViewEngine`'s `$cachePath` constructor parameter**, property and
+  assignment. Templates are plain PHP includes, so nothing is compiled or
+  cached; the value was stored in a private property with no accessor and never
+  read — write-only state, not an extension point, since a downstream could not
+  reach it either. `Application` no longer computes a storage path for it. PHP
+  ignores surplus arguments to userland functions, so an existing
+  `new ViewEngine($views, $cache)` call keeps working.
+- **`Logger`'s `KALLIOMICRO_BASE_PATH` branch.** Only the `console` entry script
+  defines that constant, and `console` passes an explicit log path — so the
+  guard could never be true. The web entry point, the one that actually reaches
+  this default, never defined it at all. `getDefaultLogPath()` now asks
+  `Application` for the base path, which is also correct if a downstream ever
+  relocates `src/`. The constant remains an application-layer convenience for
+  `app/` commands; framework code no longer reads it.
+
+### Fixed
+
+- **`Controller::renderToResponse()` applied the page layout.** It called
+  `render()` and fed the result into a DOM `replace` action — the second door to
+  the `<!DOCTYPE html>`-injected-into-a-target bug that 1.2.0 fixed for
+  `renderPartial()`, left open because the two methods were fixed separately. It
+  now renders as a partial. Documented public API, so it is repaired rather than
+  removed.
+- **`ViewEngine` and `Communicator` guarded on the wrong condition.**
+  `function_exists('config')` can never be false — `helpers.php` is in
+  composer's `autoload.files`, so `config()` exists the moment the autoloader
+  that makes these classes loadable has run. The real hazard is `config()`
+  *without an Application*: it resolves through `app()` and fataled with "Call
+  to a member function make() on null". `ViewEngine` now guards on the
+  container, so a bare `new ViewEngine($path)` calling `t()` no longer dies;
+  `Communicator` keeps only the container half of its guard.
+
+### Documented
+
+- **`Application::booting()`** — a real extension point with no callers and no
+  spec entry. It is the seam for claiming the `ExceptionHandler` binding before
+  `boot()` registers the default, which `docs/overview.md` promised without
+  naming the method that provides it. Now documented with a worked example.
+
 ## [1.2.1] – 2026-07-18
 
 Closes the QueryBuilder items left open by 1.2.0. One new method, four fixes,

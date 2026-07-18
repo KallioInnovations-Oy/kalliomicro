@@ -71,7 +71,10 @@ class Communicator
      */
     private function configured(string $key): array
     {
-        if (!function_exists('config') || \KallioMicro\Core\Application::getInstance() === null) {
+        // Only the container is worth testing: helpers.php is in composer's
+        // autoload.files, so config() is always defined by the time any
+        // KallioMicro class can load.
+        if (\KallioMicro\Core\Application::getInstance() === null) {
             return [];
         }
 

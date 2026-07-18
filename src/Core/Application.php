@@ -26,7 +26,7 @@ use Throwable;
  */
 class Application extends Container
 {
-    private const VERSION = '1.2.1';
+    private const VERSION = '1.2.2';
 
     private static ?Application $instance = null;
 
@@ -116,10 +116,7 @@ class Application extends Container
 
         // View Engine
         $this->singleton(ViewEngine::class, function () {
-            return new ViewEngine(
-                $this->resourcePath('views'),
-                $this->storagePath('cache/views')
-            );
+            return new ViewEngine($this->resourcePath('views'));
         });
         $this->alias(ViewEngine::class, 'view');
 

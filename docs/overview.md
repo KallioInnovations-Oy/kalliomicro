@@ -2,7 +2,7 @@
 
 > Sources: `src/Core/`, `src/Support/`, `public/index.php`, `console`, `config/`, `composer.json`.
 
-KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.1'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
+KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.2'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
 
 ## Design philosophy
 
@@ -97,7 +97,7 @@ $app->run()
 
 ### CLI — `console`
 
-Guards `PHP_SAPI === 'cli'`, defines `KALLIOMICRO_BASE_PATH`, locates the composer autoloader, loads `.env` + helpers, creates the `Application`, a file-only `Logger` (`storage/logs/console.log`), and an `ExceptionHandler` (debug from `config('app.debug')`), then registers commands and scheduled tasks explicitly before `$console->run($argv)`. Exit code = the command's return value. See [console.md](console.md).
+Guards `PHP_SAPI === 'cli'`, defines `KALLIOMICRO_BASE_PATH` (an **application-layer** convenience for `app/` commands — framework code in `src/` never reads it; `Application`'s path helpers are the base-path authority), locates the composer autoloader, loads `.env` + helpers, creates the `Application`, a file-only `Logger` (`storage/logs/console.log`), and an `ExceptionHandler` (debug from `config('app.debug')`), then registers commands and scheduled tasks explicitly before `$console->run($argv)`. Exit code = the command's return value. See [console.md](console.md).
 
 ### Error handling — `KallioMicro\Support\ExceptionHandler`
 
@@ -106,6 +106,17 @@ Registers exception/error/shutdown handlers. Rendering: CLI → colored STDERR (
 Status-code mapping (`getHttpCode`, public): `HttpException` → its status code; any exception whose `code` is an int in 400–599 → that status (`throw new RuntimeException('...', 403)` renders as 403); `InvalidArgumentException` → 400; everything else → 500. `HttpException` remains the preferred way to abort with a specific status.
 
 **It is the only error renderer.** `Application::handleException()` resolves `ExceptionHandler` from the container and delegates, so a web request and the registered global handler cannot disagree about escaping, trace contents, or what a production response is allowed to say. Bind your own instance (custom renderer, hidden paths, a logger) before the first request to replace the default; `Application::boot()` only registers one if the binding is unclaimed.
+
+The seam for that is **`Application::booting(Closure $callback)`** — callbacks registered with it run at the top of `boot()`, before the default `ExceptionHandler` binding is considered, so a callback that binds its own wins:
+
+```php
+$app->booting(function (Application $app): void {
+    $app->instance(ExceptionHandler::class, (new ExceptionHandler($logger, null, $debug))
+        ->setHiddenPaths([$app->basePath()]));
+});
+```
+
+Registering services directly in `public/index.php` (the usual case) needs no callback — `booting()` exists for wiring that must be deferred until boot time, or that a shared bootstrap file wants to contribute without owning the entry point.
 
 **Survivability**, because an error page that crashes is worse than useless: the error handler is registered with a level mask, so a warning raised *inside* it — the classic being `file_put_contents` failing when the log directory is unwritable — no longer becomes an `ErrorException` that escapes and destroys the original error. A re-entrancy guard stops `handleShutdown()` re-entering on a fatal the handler itself produced (which printed every crash twice), logging and notification failures are swallowed rather than replacing the exception being reported, and headers are only emitted when `headers_sent()` is false, so an exception raised mid-render appends to the partial output instead of cascading.
 

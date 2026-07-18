@@ -30,9 +30,6 @@ class Router
     /** @var array<string, Route> */
     private array $namedRoutes = [];
 
-    /** @var array<string, array<int, Closure|string>> */
-    private array $groupMiddleware = [];
-
     private string $currentGroupPrefix = '';
 
     /** @var array<int, Closure|string> */
@@ -186,14 +183,6 @@ class Router
         $this->routes[] = $route;
 
         return $route;
-    }
-
-    /**
-     * Register a named route for URL generation
-     */
-    public function registerNamed(string $name, Route $route): void
-    {
-        $this->namedRoutes[$name] = $route;
     }
 
     /**

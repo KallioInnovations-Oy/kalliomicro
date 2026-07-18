@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KallioMicro\Support;
 
+use KallioMicro\Core\Application;
 use KallioMicro\Database\Connection;
 
 /**
@@ -90,8 +91,22 @@ class Logger
 
     private function getDefaultLogPath(): string
     {
-        $basePath = defined('KALLIOMICRO_BASE_PATH') ? KALLIOMICRO_BASE_PATH : dirname(__DIR__, 2);
-        return $basePath . '/storage/logs/app.log';
+        // Application owns the base path. This used to read a
+        // KALLIOMICRO_BASE_PATH constant, which framework code has no business
+        // depending on: only the console entry script defines it, and that
+        // script passes an explicit log path — so the guard could never be
+        // true and the branch never ran. The web entry point, which is the one
+        // that actually reaches this default, never defined it at all.
+        $app = Application::getInstance();
+
+        if ($app !== null) {
+            return $app->storagePath('logs/app.log');
+        }
+
+        // No Application yet — a Logger built by an entry-script crash handler
+        // before boot. Assumes src/ sits at the project root, per the
+        // downstream base contract in docs/conventions.md.
+        return dirname(__DIR__, 2) . '/storage/logs/app.log';
     }
 
     /**
