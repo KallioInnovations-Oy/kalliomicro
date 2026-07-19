@@ -361,11 +361,34 @@ class Application extends Container
     }
 
     /**
-     * Terminate the application
+     * Post-response hook — EXTENSION POINT, empty by design
+     *
+     * The last thing run() does, after the response has been sent. It exists
+     * for work that should not sit between the handler and the client:
+     * flushing metrics, closing a queue connection, writing an access record,
+     * pruning a cache. Both the Request and the Response are passed so a
+     * subclass can see what was actually served (status, headers, timing).
+     *
+     * The base ships no implementation because it has no such work — this is a
+     * mechanism, and what belongs after the response is the deployment's to
+     * decide. Override it on an Application subclass:
+     *
+     *     final class Kernel extends Application
+     *     {
+     *         public function terminate(Request $request, Response $response): void
+     *         {
+     *             $this->make(MetricsSink::class)->record($request, $response);
+     *         }
+     *     }
+     *
+     * ⚠ "After the response is sent" is not the same as "off the request
+     * clock". PHP only truly detaches the client under FPM, and only when
+     * something calls fastcgi_finish_request(); under mod_php, the built-in
+     * server or the CLI SAPI the browser is still waiting through this method.
+     * Keep the work short, or hand it to something outside the request.
      */
     public function terminate(Request $request, Response $response): void
     {
-        // Cleanup, logging, etc.
     }
 
     /**

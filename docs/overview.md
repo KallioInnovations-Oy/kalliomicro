@@ -97,7 +97,7 @@ require routes/web.php + routes/api.php
 $app->run()
 ```
 
-`run()` captures the `Request`, runs `handle()` (boot → global middleware pipeline, outermost-first in registration order → `Router::dispatch()`), sends the `Response`, then `terminate()` (no-op hook). A `Throwable` inside `handle()` is rendered by `ExceptionHandler` (see below) at the status `getHttpCode()` maps it to — not a blanket 500, so `abort()` and `HttpException` surface correctly — as JSON for `expectsJson()` requests and HTML otherwise. Rendering happens **at the destination**, so the error response travels back out through the global middleware stack like any other.
+`run()` captures the `Request`, runs `handle()` (boot → global middleware pipeline, outermost-first in registration order → `Router::dispatch()`), sends the `Response`, then `terminate($request, $response)` — a **post-response extension point**, empty in the base. Override it on an `Application` subclass for work that should not sit between the handler and the client (metrics, an access record, closing a queue connection); both objects are passed so it can see what was served. ⚠ "After the response is sent" is not "off the request clock" — PHP only detaches the client under FPM, and only via `fastcgi_finish_request()`; under mod_php, the built-in server or CLI the browser waits through it. Keep it short. A `Throwable` inside `handle()` is rendered by `ExceptionHandler` (see below) at the status `getHttpCode()` maps it to — not a blanket 500, so `abort()` and `HttpException` surface correctly — as JSON for `expectsJson()` requests and HTML otherwise. Rendering happens **at the destination**, so the error response travels back out through the global middleware stack like any other.
 
 ### CLI — `console`
 
