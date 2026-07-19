@@ -7,6 +7,66 @@ newer base.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.4] – 2026-07-19
+
+Two defects reported from a downstream port. Both were silent, and both had
+been present since before 1.0 — neither was introduced by the 1.2.x work.
+
+**Upgrade note:** database errors that previously passed unnoticed now throw.
+That is the intended behaviour, but a project that has been running on the
+broken configuration may surface failures it was never told about.
+
+### Fixed
+
+- **PDO driver options were assembled with `array_merge()`, which renumbers
+  integer keys** — and every PDO attribute is an integer constant. The four
+  defaults came out as keys `0,1,2,3` with their values still in order, so each
+  setting landed on an unrelated attribute. The consequences were all silent:
+
+  - Key `3` **is** `ATTR_ERRMODE`, and it received `false` — that is
+    `ERRMODE_SILENT`. **A stock connection did not throw on SQL errors.**
+    Failed statements returned no rows and no complaint.
+  - `ATTR_EMULATE_PREPARES => false` never arrived, leaving MySQL on PDO's
+    default of **emulated prepares**, contradicting the "native prepared
+    statements" guarantee in `docs/database.md`.
+  - `ATTR_DEFAULT_FETCH_MODE` never arrived, so rows came back `FETCH_BOTH`.
+  - `ATTR_AUTOCOMMIT`, `ATTR_PREFETCH` and `ATTR_TIMEOUT` received values
+    intended for other attributes entirely.
+  - **A downstream's own options were renumbered too.** This is why the
+    `MYSQL_ATTR_FOUND_ROWS` escape hatch documented in 1.2.1 had no effect —
+    that documentation was wrong, and is corrected.
+
+  Now `array_replace()`, which preserves integer keys and gives config the last
+  word. Option assembly moved into a `buildOptions()` method so it can be
+  asserted without a live database.
+
+- **Request-path exceptions were rendered but never logged.**
+  `Application::handleException()` called `render()`, which does not log;
+  `logException()` ran only from the globally-registered handler path, and
+  `public/index.php` does not register one. A production 500 was shown to the
+  visitor and left no trace anywhere. It now calls `report()` before `render()`.
+
+  Reporting is best-effort and guarded twice — `report()` swallows its own
+  failures, and the call site catches as well. A handler that logs to the
+  database is a normal thing to bind, and the database being down is a normal
+  reason for the 500 in the first place; a reporter that throws must not cost
+  the visitor the error page.
+
+### Added
+
+- **A default `Logger` binding.** `boot()` registers a file logger
+  (`storage/logs/app.log`) if nothing else claimed `Logger::class`, and passes
+  it to the default `ExceptionHandler`. Without a logger `report()` has nowhere
+  to write, so the fix above would have been a no-op in a stock application.
+  Bind your own `Logger` and the error handler picks it up.
+
+### Documentation
+
+- `docs/database.md` — the `options` merge semantics, and the corrected
+  `MYSQL_ATTR_FOUND_ROWS` note.
+- `docs/overview.md` — request-path reporting, the two boot-time bindings, and
+  how to replace either.
+
 ## [1.2.3] – 2026-07-18
 
 Two silent no-ops, both the same shape as the dead code removed in 1.2.2:

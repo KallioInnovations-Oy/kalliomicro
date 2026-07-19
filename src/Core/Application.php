@@ -10,6 +10,7 @@ use KallioMicro\Http\HttpException;
 use KallioMicro\Http\Request;
 use KallioMicro\Http\Response;
 use KallioMicro\Support\ExceptionHandler;
+use KallioMicro\Support\Logger;
 use KallioMicro\Routing\Router;
 use KallioMicro\Database\Connection;
 use KallioMicro\View\ViewEngine;
@@ -26,7 +27,7 @@ use Throwable;
  */
 class Application extends Container
 {
-    private const VERSION = '1.2.3';
+    private const VERSION = '1.2.4';
 
     private static ?Application $instance = null;
 
@@ -179,14 +180,24 @@ class Application extends Container
 
         $this->applyTimezone();
 
+        // Default file logger, so an unconfigured application still records
+        // its own failures. Bind your own (database-backed, a different
+        // channel) and the error handler below picks it up.
+        if (!$this->has(Logger::class)) {
+            $this->singleton(Logger::class, fn (): Logger => new Logger());
+        }
+
         // Default error renderer, registered only if nothing else claimed the
         // binding — a boot callback that binds its own (custom renderer, hidden
         // paths, a logger) wins. Autowiring would otherwise construct one with
         // the constructor's debug=false and never show a debug page.
+        //
+        // The Logger is passed explicitly: without one, report() has nowhere to
+        // write and every handled exception is silently discarded.
         if (!$this->has(ExceptionHandler::class)) {
             $this->singleton(ExceptionHandler::class, function (): ExceptionHandler {
                 $debug = (bool) $this->make(Config::class)->get('app.debug', false);
-                return new ExceptionHandler(debug: $debug);
+                return new ExceptionHandler($this->make(Logger::class), null, $debug);
             });
         }
 
@@ -320,6 +331,20 @@ class Application extends Container
     private function handleException(Throwable $e, Request $request): Response
     {
         $handler = $this->make(ExceptionHandler::class);
+
+        // Report before rendering. Only ExceptionHandler's globally-registered
+        // path logged, and public/index.php does not register it — so a
+        // production 500 was rendered to the visitor and left no trace anywhere.
+        //
+        // Guarded even though report() swallows its own failures: a downstream
+        // handler that logs to the database is a normal thing to bind, and the
+        // database being down is a normal reason for the 500 in the first
+        // place. A reporter that throws must not cost the visitor the error page.
+        try {
+            $handler->report($e);
+        } catch (Throwable) {
+            // Reporting is best-effort; rendering is not.
+        }
 
         // requireCsrf() (403), HttpException::notFound() (404), etc. must
         // surface at their declared status — a blanket 500 breaks the

@@ -93,13 +93,7 @@ class ExceptionHandler
         $this->handling = true;
 
         try {
-            // Reporting must never be able to replace the error being reported.
-            try {
-                $this->logException($e);
-                $this->notifyIfCritical($e);
-            } catch (\Throwable) {
-                // Nowhere left to report it to.
-            }
+            $this->report($e);
 
             if ($this->isCli()) {
                 $this->renderForCli($e);
@@ -152,11 +146,18 @@ class ExceptionHandler
 
     /**
      * Report an exception without rendering
+     *
+     * Swallows its own failures: reporting must never be able to replace the
+     * error being reported, whichever path calls it.
      */
     public function report(\Throwable $e): void
     {
-        $this->logException($e);
-        $this->notifyIfCritical($e);
+        try {
+            $this->logException($e);
+            $this->notifyIfCritical($e);
+        } catch (\Throwable) {
+            // Nowhere left to report it to.
+        }
     }
 
     /**

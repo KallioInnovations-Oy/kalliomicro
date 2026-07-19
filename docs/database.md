@@ -15,6 +15,13 @@ Config keys (merged over defaults): `driver` (`mysql`), `host` (`localhost`), `p
 
 The PDO connection is **lazy** — nothing connects until the first query. PDO is configured with `ERRMODE_EXCEPTION`, `FETCH_ASSOC`, **`EMULATE_PREPARES = false`** (native prepares — a named placeholder may appear only once per statement), `STRINGIFY_FETCHES = false`. For MySQL, `SET NAMES '<charset>' COLLATE '<collation>'` runs on connect. DSN drivers: `mysql`, `pgsql`, `sqlite`; anything else throws. Connection failures re-throw as `RuntimeException`.
 
+**`options` are merged by key, and yours win.** PDO attributes are integer constants, so the merge uses `array_replace()` — `array_merge()` renumbers integer keys, which silently moved every default onto an unrelated attribute (see the 1.2.4 entry in the [CHANGELOG](../CHANGELOG.md)). Anything you set under its real constant reaches PDO and overrides the default:
+
+```php
+// config/database.php — matched-row semantics instead of changed-row
+'options' => [PDO::MYSQL_ATTR_FOUND_ROWS => true],
+```
+
 ### Raw query API
 
 ```php
@@ -37,7 +44,7 @@ public function delete(string $table, array $where): int
 
 - `upsert()` with empty `$updateColumns` updates **all** data columns on key collision (MySQL-specific).
 - `update()`/`delete()` throw `RuntimeException` on an empty `$where` array — a deliberate whole-table write goes through `query()` with explicit SQL. (The QueryBuilder's `update()`/`delete()` have the same guard.)
-- ⚠ **`update()`, `delete()` and `affectedRows()` return rows *changed*, not rows *matched*** (as of 2026-07-18). `MYSQL_ATTR_FOUND_ROWS` is not set, so rewriting a row with identical values returns 0 — indistinguishable from "no such row". Do not use the return value as an existence check; `SELECT` first when you need to tell those apart. A deployment that prefers matched-row semantics can set the attribute itself via `config('database.connections.*.options')`, which is merged into PDO's options — the base does not set it because flipping it would silently change the meaning of every existing downstream's return value.
+- ⚠ **`update()`, `delete()` and `affectedRows()` return rows *changed*, not rows *matched*** (as of 2026-07-18). `MYSQL_ATTR_FOUND_ROWS` is not set, so rewriting a row with identical values returns 0 — indistinguishable from "no such row". Do not use the return value as an existence check; `SELECT` first when you need to tell those apart. A deployment that prefers matched-row semantics sets the attribute itself via `config('database.connections.*.options')` (see "options are merged by key" above) — the base does not set it because flipping it would silently change the meaning of every existing downstream's return value. Note this escape hatch **did not work before 1.2.4**: the options merge renumbered the attribute key, so the setting never reached PDO.
 - ⚠ **`upsert()` returns 0 whenever the update path is taken** (as of 2026-07-18), because MySQL's `lastInsertId()` reports nothing for `ON DUPLICATE KEY UPDATE`. A 0 means "updated an existing row" *or* "failed" — check `affectedRows()` (1 = inserted, 2 = updated with a change, 0 = updated with no change) if you need to distinguish.
 - **Bindings must be scalar or null.** An array or object binding throws `InvalidArgumentException`; it previously reached PDO and stringified to the literal `'Array'`, writing that into the column. A list of values is `whereIn()`'s job.
 - ⚠ **`insert()` returns 0 on a table with no AUTO_INCREMENT** (as of 2026-07-18), because that is what `lastInsertId()` reports — indistinguishable from failure. A failed insert throws, so treat "no exception" as success and ignore the return value on such tables. Same shape as the `upsert()` note above.

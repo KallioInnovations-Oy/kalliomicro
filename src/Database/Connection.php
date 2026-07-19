@@ -59,13 +59,7 @@ class Connection
     private function connect(): void
     {
         $dsn = $this->buildDsn();
-
-        $options = array_merge([
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-            PDO::ATTR_STRINGIFY_FETCHES => false,
-        ], $this->config['options']);
+        $options = $this->buildOptions();
 
         try {
             $this->pdo = new PDO(
@@ -391,6 +385,43 @@ class Connection
     public function affectedRows(): int
     {
         return $this->lastStatement?->rowCount() ?? 0;
+    }
+
+    /**
+     * PDO driver options: the framework's defaults, overridden by config
+     *
+     * MUST NOT use array_merge(). PDO attributes are integer constants, and
+     * array_merge RENUMBERS integer keys — so `[ATTR_ERRMODE => EXCEPTION,
+     * ATTR_DEFAULT_FETCH_MODE => FETCH_ASSOC, ATTR_EMULATE_PREPARES => false,
+     * ATTR_STRINGIFY_FETCHES => false]` came out as keys 0,1,2,3 with the
+     * original values still in order. Every setting landed on the wrong
+     * attribute, and the damage was silent:
+     *
+     *   - key 3 IS ATTR_ERRMODE, and it received `false` — that is
+     *     ERRMODE_SILENT, so PDO stopped throwing on SQL errors entirely.
+     *   - ATTR_EMULATE_PREPARES never arrived, leaving MySQL on PDO's default
+     *     of emulated prepares, contradicting this framework's documented
+     *     "native prepared statements" guarantee.
+     *   - ATTR_DEFAULT_FETCH_MODE never arrived, so rows came back FETCH_BOTH.
+     *   - a downstream's own options were renumbered too, which is why
+     *     configuring something like MYSQL_ATTR_FOUND_ROWS had no effect.
+     *
+     * array_replace() preserves integer keys and gives config the last word.
+     *
+     * @return array<int, mixed>
+     */
+    private function buildOptions(): array
+    {
+        $defaults = [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false,
+            PDO::ATTR_STRINGIFY_FETCHES => false,
+        ];
+
+        $configured = $this->config['options'];
+
+        return is_array($configured) ? array_replace($defaults, $configured) : $defaults;
     }
 
     /**

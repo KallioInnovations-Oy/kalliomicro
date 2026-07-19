@@ -10,6 +10,7 @@ use KallioMicro\Http\HttpException;
 use KallioMicro\Http\Request;
 use KallioMicro\Http\Response;
 use KallioMicro\Routing\Router;
+use KallioMicro\Support\ExceptionHandler;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -104,6 +105,61 @@ class ExceptionResponseTest extends TestCase
 
         $this->assertSame(404, $response->getStatusCode());
         $this->assertStringNotContainsString('widget 42', $response->getContent());
+    }
+
+    /**
+     * Only ExceptionHandler's globally-registered path logged, and
+     * public/index.php never registers it — so a production 500 was rendered
+     * to the visitor and left no trace anywhere. Rendering was fixed in 1.2.0;
+     * reporting was not.
+     */
+    public function testRequestPathExceptionsAreLogged(): void
+    {
+        $logFile = $this->app->storagePath('logs/app.log');
+        @unlink($logFile);
+
+        $this->bootApp(false);
+        $response = $this->app->handle(Request::create('/boom'));
+
+        $this->assertSame(500, $response->getStatusCode());
+        $this->assertFileExists($logFile, 'a production 500 left no trace');
+
+        $logged = (string) file_get_contents($logFile);
+        $this->assertStringContainsString('abc123', $logged, 'the log must carry what the response withholds');
+        $this->assertStringContainsString('RuntimeException', $logged);
+
+        // The response itself still leaks nothing.
+        $this->assertStringNotContainsString('abc123', $response->getContent());
+
+        @unlink($logFile);
+    }
+
+    /**
+     * A logger that throws must not replace the error being reported.
+     */
+    public function testAFailingLoggerDoesNotMaskTheOriginalError(): void
+    {
+        $this->bootApp(false);
+
+        $this->app->instance(ExceptionHandler::class, new class (debug: false) extends ExceptionHandler {
+            public function report(\Throwable $e): void
+            {
+                parent::report($e);
+                throw new \RuntimeException('logger exploded');
+            }
+        });
+
+        // A database-backed logger throwing because the database is down —
+        // which is a normal reason for the 500 in the first place — must not
+        // cost the visitor the error page.
+        try {
+            $response = $this->app->handle(Request::create('/boom'));
+        } catch (\Throwable $e) {
+            $this->fail('reporting failure escaped and replaced the response: ' . $e->getMessage());
+        }
+
+        $this->assertSame(500, $response->getStatusCode());
+        $this->assertStringNotContainsString('logger exploded', $response->getContent());
     }
 
     public function testJsonDebugPayloadDoesNotShipCallArguments(): void

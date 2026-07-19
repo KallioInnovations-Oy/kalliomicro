@@ -2,7 +2,7 @@
 
 > Sources: `src/Core/`, `src/Support/`, `public/index.php`, `console`, `config/`, `composer.json`.
 
-KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.3'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
+KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.4'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
 
 ## Design philosophy
 
@@ -56,6 +56,8 @@ Resolution rules:
 
 The `Application` constructor self-registers five core singletons with string aliases: `Config` (`'config'`), `Router` (`'router'`), `Request` (`'request'`, via `Request::capture()`), `ViewEngine` (`'view'`), `Session` (`'session'`).
 
+`boot()` registers two more, each **only if the binding is unclaimed**, so anything you bind first wins: `Logger` (file, `storage/logs/app.log`) and `ExceptionHandler` (debug from `config('app.debug')`, wired to that `Logger`). See [Error handling](#error-handling--kalliomicrosupportexceptionhandler) below.
+
 `registerDatabase(string $name, array $config)` binds `"db.{name}"` connections from `config/database.php`; the connection named `default` — or the first one registered — is aliased to `Connection::class` and `'db'`.
 
 ---
@@ -106,6 +108,10 @@ Guards `PHP_SAPI === 'cli'`, defines `KALLIOMICRO_BASE_PATH` (an **application-l
 Registers exception/error/shutdown handlers. Rendering: CLI → colored STDERR (exit 1); JSON-wanting requests → JSON (debug adds exception/file/line/trace); web → full debug page in debug mode, generic error page otherwise. Paths listed via `setHiddenPaths()` are redacted in traces. Critical errors (`Error`, `PDOException`, `RuntimeException`) can notify Teams via `Communicator` when `notifyOnCritical` is enabled.
 
 Status-code mapping (`getHttpCode`, public): `HttpException` → its status code; any exception whose `code` is an int in 400–599 → that status (`throw new RuntimeException('...', 403)` renders as 403); `InvalidArgumentException` → 400; everything else → 500. `HttpException` remains the preferred way to abort with a specific status.
+
+**Request-path exceptions are reported as well as rendered.** `Application::handleException()` calls `report()` (log + critical notification) before `render()`. Previously only the globally-registered handler logged, and `public/index.php` does not register one — so a production 500 was rendered to the visitor and left no trace anywhere. Reporting is best-effort and guarded twice: `report()` swallows its own failures, and the call site catches as well, because a database-backed handler throwing when the database is down is a normal reason for the 500 in the first place. A reporter that fails must not cost the visitor the error page.
+
+`Application::boot()` binds a **default file `Logger`** (`storage/logs/app.log`) if nothing else claimed `Logger::class`, and passes it to the default `ExceptionHandler` — without a logger, `report()` has nowhere to write and every handled exception is discarded. Bind your own `Logger` (database-backed, a different channel) and the error handler picks it up.
 
 **It is the only error renderer.** `Application::handleException()` resolves `ExceptionHandler` from the container and delegates, so a web request and the registered global handler cannot disagree about escaping, trace contents, or what a production response is allowed to say. Bind your own instance (custom renderer, hidden paths, a logger) before the first request to replace the default; `Application::boot()` only registers one if the binding is unclaimed.
 
