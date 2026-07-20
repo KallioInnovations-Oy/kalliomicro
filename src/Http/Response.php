@@ -123,6 +123,9 @@ class Response
 
     /**
      * Create a file download response
+     *
+     * $filename may contain any characters, including quotes and non-ASCII;
+     * see contentDisposition() for how it is encoded into the header.
      */
     public static function download(
         string $content,
@@ -131,12 +134,15 @@ class Response
     ): self {
         return (new self($content, 200))
             ->header('Content-Type', $contentType)
-            ->header('Content-Disposition', "attachment; filename=\"{$filename}\"")
+            ->header('Content-Disposition', self::contentDisposition('attachment', $filename))
             ->header('Content-Length', (string) strlen($content));
     }
 
     /**
      * Create a file response (inline)
+     *
+     * $filename may contain any characters, including quotes and non-ASCII;
+     * see contentDisposition() for how it is encoded into the header.
      */
     public static function file(
         string $content,
@@ -145,8 +151,35 @@ class Response
     ): self {
         return (new self($content, 200))
             ->header('Content-Type', $contentType)
-            ->header('Content-Disposition', "inline; filename=\"{$filename}\"")
+            ->header('Content-Disposition', self::contentDisposition('inline', $filename))
             ->header('Content-Length', (string) strlen($content));
+    }
+
+    /**
+     * Build an RFC 6266 Content-Disposition value for an arbitrary filename.
+     *
+     * The quoted filename= parameter must stay within printable ASCII and
+     * cannot carry `"` or `\` (they break the quoted-string) or `%` (some
+     * agents percent-decode it). Those bytes are replaced with `_` to form a
+     * fallback every client can parse; when anything was replaced, the exact
+     * name is carried alongside in filename* (RFC 5987, UTF-8 percent-encoded),
+     * which conforming clients prefer over the fallback.
+     */
+    private static function contentDisposition(string $type, string $filename): string
+    {
+        // One underscore per character; the byte-wise retry covers names that
+        // are not valid UTF-8 (the /u match returns null on those).
+        $fallback = preg_replace('/[^\x20-\x7e]/u', '_', $filename)
+            ?? preg_replace('/[^\x20-\x7e]/', '_', $filename);
+        $fallback = str_replace(['"', '\\', '%'], '_', $fallback);
+
+        $header = $type . '; filename="' . $fallback . '"';
+
+        if ($fallback !== $filename) {
+            $header .= "; filename*=UTF-8''" . rawurlencode($filename);
+        }
+
+        return $header;
     }
 
     // Fluent setters

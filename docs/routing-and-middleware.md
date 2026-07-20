@@ -112,6 +112,13 @@ Response::download(string $content, string $filename, string $contentType = 'app
 Response::file(string $content, string $filename, string $contentType)   // inline disposition
 ```
 
+`download()` / `file()` accept any `$filename`, including quotes and non-ASCII
+(RFC 6266): the quoted `filename=` parameter carries an ASCII fallback — `"`,
+`\`, `%`, control and non-ASCII characters each replaced with `_` — and when
+anything was replaced, the exact name travels alongside as
+`filename*=UTF-8''…` (RFC 5987), which conforming clients prefer over the
+fallback.
+
 Fluent: `status()`, `content()`, `header()` (replaces), `addHeader()` (appends), `withHeaders()`, `cookie()` / `forgetCookie()` (SameSite-aware). Getters: `getContent()`, `getStatusCode()`, `getStatusText()`, `getHeaders()` (`name => string[]`), `getHeader()`. Predicates: `isSuccessful()`, `isRedirection()`, `isClientError()`, `isServerError()`, `isOk()`, `isNotFound()`. `send()` emits status line, headers, cookies, body.
 
 ## Controller base class

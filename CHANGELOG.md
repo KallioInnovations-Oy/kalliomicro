@@ -7,6 +7,25 @@ newer base.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.5] – 2026-07-20
+
+### Fixed
+
+- **`Response::download()` / `Response::file()` interpolated the caller's
+  filename verbatim into the quoted `filename=` parameter of
+  `Content-Disposition`.** A `"` in the name broke the quoted-string and left
+  browser behaviour undefined, and non-ASCII names were shipped as raw bytes
+  instead of the RFC 6266 `filename*` parameter. Reported from a downstream
+  port (MESOv4).
+
+  The parameter is now built safely: `filename=` carries an ASCII fallback
+  (`"`, `\`, `%`, control and non-ASCII characters each replaced with `_`),
+  and when anything was replaced the exact name is added as
+  `filename*=UTF-8''…` (RFC 5987), which conforming clients prefer. Plain
+  ASCII names produce the same header as before. Note this was never a header
+  injection vector — PHP's `header()` rejects values containing CR/LF — the
+  defect was a malformed or mangled filename.
+
 ## [1.2.4] – 2026-07-19
 
 Two defects reported from a downstream port. Both were silent, and both had
