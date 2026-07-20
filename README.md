@@ -389,6 +389,23 @@ throw HttpException::validationError('Invalid email format');
 
 In debug mode, exceptions show detailed stack traces. In production, users see friendly error pages while details are logged and optionally sent via notification.
 
+## Contributing
+
+- **Bug fixes are welcome.** Please include a test — the suite in `tests/` is
+  the executable spec. Before reporting a bug, check your copy's
+  `Application::version()` against [CHANGELOG.md](CHANGELOG.md); it may already
+  be fixed.
+- **Features must adhere to the project scope.** The framework is deliberately
+  minimal — see the complexity budget and scope boundaries in
+  [docs/conventions.md](docs/conventions.md). A missing feature is usually a
+  scope boundary, not a gap: open an issue to discuss before writing code, or
+  it will likely be declined regardless of quality.
+- **Fork freely for extended features.** The MIT license is the extension
+  mechanism: if you need queues, RBAC, migrations, or anything else outside
+  the base scope, a fork or a downstream module is the intended path.
+- **Review may not be fast.** This is a side project; there is no response-time
+  promise.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2026 KallioInnovations Oy.
