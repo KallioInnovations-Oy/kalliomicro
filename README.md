@@ -1,6 +1,6 @@
 # KallioMicro Framework
 
-A modern, secure PHP 8+ MVC framework built with SOLID principles and minimal dependencies.
+A modern, secure PHP 8.1+ MVC framework built with SOLID principles and minimal dependencies.
 
 ## Documentation
 
@@ -18,7 +18,7 @@ Building a project on this base? Read the **base contract** in [docs/conventions
 - **Multi-Auth Support**: Local, Entra ID, LDAP, Google
 - **Native PHP Templating**: layouts, sections, escaping helpers
 - **Query Builder**: Fluent database interface with automatic parameter binding and identifier validation
-- **Unified Logging**: Database and file logging with PSR-3 support
+- **Unified Logging**: Database and file logging with a PSR-3-style API (no `psr/log` dependency)
 - **Notifications**: Email (PHPMailer) and webhook support (Teams, Slack)
 - **Error Handling**: Global exception handler with formatted output
 - **CLI Console**: Task runner with cron scheduling
@@ -28,8 +28,12 @@ Building a project on this base? Read the **base contract** in [docs/conventions
 ```
 framework/
 ├── app/                    # Application code
+│   ├── Console/Commands/   # Your CLI commands
 │   └── Controllers/        # Your controllers
 ├── config/                 # Configuration files
+├── console                 # CLI entry point
+├── database/               # schema.sql baseline
+├── docs/                   # Framework specification (verified against src/)
 ├── public/                 # Web root
 │   └── index.php          # Entry point
 ├── resources/
@@ -39,15 +43,16 @@ framework/
 │   ├── web.php            # Web routes
 │   └── api.php            # API routes
 ├── src/                   # Framework core
-│   ├── Core/              # Application, Container, Config
-│   ├── Http/              # Request, Response, Controller
-│   ├── Routing/           # Router, Route
-│   ├── Database/          # Connection, QueryBuilder
 │   ├── Auth/              # Session, AuthManager, Providers
+│   ├── Console/           # Console, Command, built-in commands
+│   ├── Core/              # Application, Container, Config
+│   ├── Database/          # Connection, QueryBuilder
+│   ├── Http/              # Request, Response, Controller, ApiResponse
 │   ├── Middleware/        # Middleware classes
-│   ├── View/              # ViewEngine
-│   └── Support/           # Helpers
-└── tests/                 # Test files
+│   ├── Routing/           # Router, Route
+│   ├── Support/           # Logger, Communicator, ExceptionHandler, helpers
+│   └── View/              # ViewEngine
+└── tests/                 # Test suite (the executable spec)
 ```
 
 ## Quick Start
@@ -144,10 +149,15 @@ All API responses follow this structure:
 | `close_modal` | Close current modal |
 | `close_all_modals` | Close all modals |
 | `refresh_table` | Refresh DataTable |
+| `add_table_rows` | Append rows to a DataTable |
 | `clear_form` | Clear form fields |
+| `reset_form` | Reset form to initial values |
 | `toggle_visibility` | Show/hide element |
+| `toggle_disabled` | Enable/disable element |
+| `toggle_class` | Add/remove a CSS class |
 | `scroll_to` | Scroll to element |
 | `focus` | Focus element |
+| `trigger_event` | Dispatch a DOM event on element |
 | `download` | Trigger file download |
 | `confirm` | Show confirmation before proceeding |
 
