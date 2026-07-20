@@ -13,6 +13,10 @@ Standing directive. Before adding any abstraction, layer, flag, catch-block, or 
 
 The base framework itself is the product of this rule — it ships no queue, no RBAC, no migrations, no build pipeline, because the base has no consumer for them. Downstream projects add modules when a real requirement arrives.
 
+## Dependency policy
+
+Runtime `require` stays at **PHP + PHPMailer, period** — nothing new lands there without revisiting this document. Dev-only tooling (`require-dev`, currently PHPUnit) is allowed only when it never ships and the framework remains fully runnable without it: `composer install --no-dev` must always produce a complete, working deployment. Each proposed dev dependency is judged on its own — "PHPUnit got in" is not an argument for the next one.
+
 ## PHP standards
 
 - Every file starts with `declare(strict_types=1);` immediately after `<?php`.
@@ -47,6 +51,9 @@ Changes to `src/` affect every downstream project:
 - Must not break existing controller patterns or route definitions.
 - Must preserve the QueryBuilder's parameter-binding and identifier-validation behavior.
 - Update the matching document in `docs/` in the same change — docs are verified against code, and a ⚠ marker with an "as of" date is the required way to document a known defect that isn't fixed yet.
+- Run `composer test` and add/extend a test with the change — the suite in `tests/` is the executable spec that settles "bug vs. intended boundary". It is also a named second consumer of the construction seams (`Request::create()`, a `Connection` subclass, container `instance()` swaps): keep those seams working.
+- `public/assets/js/kalliomicro.js` and `resources/assets/js/kalliomicro.js` must stay **byte-identical** — apply every edit to both.
+- Bump `Application::VERSION` and add a `CHANGELOG.md` entry for any behavior change — downstream copies identify their snapshot by that version.
 
 ## Security checklist (pre-commit)
 
@@ -60,11 +67,20 @@ Changes to `src/` affect every downstream project:
 8. `ApiResponse` chains end `->toResponse()`.
 9. Validate before any database write.
 10. No `env()` calls outside `config/*.php`.
+11. `composer test` passes.
+
+## Downstream projects: the base contract
+
+This repository is a copy-template — projects are created by copying it and building in `app/`, `resources/`, `routes/`, and `config/`. In a project copy:
+
+1. **Treat `src/` as read-only vendored framework code.** Framework changes go to the base repository, not your copy — a local patch is lost knowledge and blocks future re-syncs.
+2. **Before reporting a framework bug:** check `KallioMicro\Core\Application::version()` against the base [CHANGELOG.md](../CHANGELOG.md) (your copy may predate a fix), and read the matching `docs/` chapter — ⚠ markers are *known* sharp edges, and scope notes mark functionality absent **by design**.
+3. **A missing Laravel feature is a scope boundary, not a bug.** The API mimics Laravel's vocabulary on purpose ("Laravel light"), but the surface is deliberately smaller; unknown validation rules and QueryBuilder methods throw self-describing exceptions stating the boundary — trust those messages over Laravel habits.
 
 ## Extension guidance for downstream projects
 
 - **Services:** register in `public/index.php` next to the AuthManager binding. Once the CLI needs the same services, extract the bindings into a shared file both entry points `require` — do not duplicate them.
-- **Middleware:** implement `MiddlewareInterface`; wire as closures on routes (`Route::middleware()` takes closures).
+- **Middleware:** implement `MiddlewareInterface` (one class per file — the container autoloads class-string middleware via PSR-4); wire on routes as a class-string (`Route::middleware(MyMiddleware::class)`) or as a closure when constructor arguments are needed.
 - **Auth providers:** implement `AuthProviderInterface` (or `OAuthProviderInterface`) and `registerProvider()` on the AuthManager.
 - **Client actions:** new `ApiResponse` action types need a matching `case` in `kalliomicro.js` (`executeAction`) *in the same change* — a builder without a client handler is silently dropped.
-- **Mechanism vs. policy:** the base deliberately ships mechanisms without policies — impersonation without an authorization gate, a scheduler without overlap locking, login without throttling, sessions without a shared store, OAuth without account-provisioning rules. These are scope boundaries, not defects: each policy belongs to the deployment that knows its requirements. Decide each consciously before production. The contracts are stated twice on purpose: as scope notes in [auth.md](auth.md) / [console.md](console.md), and as docblocks at the call sites (`Session::impersonate()`, `AuthManager::attemptWith()` / `handleOAuthCallback()`, `Console::schedule()`), so nobody has to leave the editor to learn what they own.
+- **Mechanism vs. policy:** the base deliberately ships mechanisms without policies — impersonation without an authorization gate, a scheduler whose overlap lock is host-local (multi-host needs a distributed lock), login without throttling, sessions without a shared store, OAuth without account-provisioning rules. These are scope boundaries, not defects: each policy belongs to the deployment that knows its requirements. Decide each consciously before production. The contracts are stated twice on purpose: as scope notes in [auth.md](auth.md) / [console.md](console.md), and as docblocks at the call sites (`Session::impersonate()`, `AuthManager::attemptWith()` / `handleOAuthCallback()`, `Console::schedule()`), so nobody has to leave the editor to learn what they own.

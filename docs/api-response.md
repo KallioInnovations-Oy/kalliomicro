@@ -89,9 +89,9 @@ Every builder has a working client handler. Payload column = fields the client c
 
 Notes:
 
-- **Modal sizes:** `size` becomes the Bootstrap dialog class `modal-{size}` — only `sm`, `lg`, `xl` are real Bootstrap classes; `md` (default width) and `full` are effectively no-ops.
+- **Modal sizes:** `size` becomes the Bootstrap dialog class `modal-{size}` — only `sm`, `lg`, `xl` are real Bootstrap classes; `md` (default width) and `full` are effectively no-ops. `id`, `size` and the nesting level are attribute-escaped before interpolation, so they cannot break out of the attribute; `content` is injected raw by design — it is the server-rendered modal body.
 - **`refresh_table` semantics:** with jQuery + DataTables loaded, the table redraws in place; without them (the shipped layout loads neither) it falls back to a **full page reload** so state is always reflected. For partial updates without a reload, prefer `replace('#table tbody', $rowsHtml)` — the pattern the demo `AssessmentController::search()` uses.
-- ⚠ **`validationError()` field errors are not rendered per-field** by the stock client — `data.validation_errors` is ignored; only the message is flashed. The client's own `validateForm()` pre-checks `[required]` fields before submitting. Render server-side errors yourself (re-render the form partial via `replace`/`modal`) or extend the client.
+- **`validationError()` field errors render per-field.** The client reads `data.validation_errors` (`field => messages`), marks each matching `[name="field"]` input `is-invalid`, and shows the message in an adjacent `.invalid-feedback` (a template-authored one is reused — its original text is remembered in `data-km-original` and restored on clear; otherwise one is created, tagged `data-km-error`). The first invalid field is focused; errors clear on the next submit of the same form. Rendering is **strictly scoped to the submitting form** (resolved from the trigger element); when no form is resolvable (e.g. a standalone action button), nothing is rendered — the flash message alone reports the failure, so unrelated forms are never touched. The client's own `validateForm()` still pre-checks `[required]` fields before submitting.
 
 ---
 
@@ -105,7 +105,13 @@ An IIFE module exposing the global `KallioMicro` (`{ init, request, flash, showM
 
 ### Requests and CSRF
 
-`request(url, options)` wraps `fetch` with `Accept: application/json` and `X-Requested-With: XMLHttpRequest`; **POST/PUT/PATCH/DELETE additionally carry the `X-CSRF-Token` header**. AJAX form submissions also append the `csrf_token` field when missing. Non-JSON responses are wrapped as `{success, code, message: '', data: {content}}`; network errors surface as an error flash.
+`request(url, options)` wraps `fetch` with `Accept: application/json` and `X-Requested-With: XMLHttpRequest`; **POST/PUT/PATCH/DELETE additionally carry the `X-CSRF-Token` header**. AJAX form submissions also append the `csrf_token` field when missing. Network errors surface as an error flash.
+
+**Only `application/json` bodies are consumed.** A response the server did not label `application/json` is reported as a failure (`{success: false, code: 4}`) and its body is **discarded** — it is never handed to `innerHTML`/`insertAdjacentHTML`. This matters because `fetch` follows redirects transparently: an auth or consent gate answering `302` → HTML login page would otherwise arrive looking exactly like the endpoint's own output, and the client would inject that entire page into a modal. Nothing in the body distinguishes the two, so the content type is the only trustworthy signal.
+
+When the response was redirected (`response.redirected`) the client additionally emits a `redirect` action to the final URL — but **only if that URL is same-origin**, so a server-side open redirect cannot turn a background request into an off-site navigation. Cross-origin destinations are reported in the console and flashed, never followed.
+
+Consequence for controllers: **serve modal/partial content as JSON**, i.e. an `ApiResponse` with a `modal`/`replace` action (or explicit `withData(['content' => …])`). Returning a bare HTML view to a `data-action` endpoint no longer renders — it flashes an error.
 
 ### Trigger system — `data-action`
 
@@ -114,14 +120,35 @@ Clicks on `[data-action]` elements dispatch declaratively:
 | `data-action` | Attributes read | Behavior |
 |---|---|---|
 | `submit` | `data-form` (id) or closest form; `data-url` | AJAX-submits the form |
-| `load` | `data-url`, `data-target`, `data-method` (GET) | Fetches and processes the response |
+| `load` | `data-url`, `data-method` (GET) | Fetches and processes the response — **placement comes from the response's actions**, see below |
 | `confirm` | `data-message`, `data-confirm-text`, `data-cancel-text`, `data-url`, `data-method` (POST), other `data-*` as payload | Confirm dialog → request |
-| `modal` | `data-url`, `data-size` (md) | Fetches content into a modal (`response.data.content` or a `modal` action) |
+| `modal` | `data-url`, `data-size` (md) | Fetches content into a modal (JSON `response.data.content`, or a `modal` action) |
 | `close-modal` | — | Closes the topmost modal |
 | `toggle` | `data-target`, `data-toggle-class` (`d-none`) | Class toggle |
 | `copy` | `data-copy-text` or element text | Clipboard copy + flash |
 
 Forms opt into AJAX with the `data-ajax` attribute (method from `data-method` → `form.method` → POST); `data-auto-submit` on a field submits its form on change. ESC closes the topmost modal.
+
+**`data-target` on a `load` action is inert.** The client acts only on the actions in the response, and each of those carries its own `target`; `data-target` has never influenced placement. It is accepted (markup may use it to document intent) but no longer *required*, and setting one logs a `console.warn` — a mandatory-looking attribute that does nothing is worse than no attribute. To place loaded content, return `replace('#container', $html)` (or `append`/`prepend`) from the controller.
+
+### Failure visibility
+
+Two classes of silent failure are now audible in the console. Neither changes what the DOM ends up looking like:
+
+- **Missing target.** Every target-taking action that matches no element logs `KallioMicro: no element matches "<selector>" — <action> skipped`. The action still no-ops (a shared response may name targets a given page does not have), but a stale selector no longer looks identical to a working feature.
+- **A throwing action.** Actions execute independently inside a `try`/`catch`: a malformed selector (`querySelector` raises `SyntaxError`) used to abort every remaining action in the list and escape as an unhandled promise rejection. Now the bad action is logged with `console.error`, an error flash is shown, and the rest of the list still runs. The four request call sites (`load`, `confirm`, `modal`, form submit) also carry a `.catch()` for the same reason.
+
+### ⚠ Delegation amplifies HTML-injection bugs (as of 2026-07-18 — by design, not fixed in the client)
+
+`data-action` handling is delegated at `document` level, so it applies to **any** matching element, including markup injected later by a `replace`/`append`/`modal` action. A single unescaped value that lands in the DOM as
+
+```html
+<button data-action="submit" data-url="/app/users/1/delete" data-method="POST">Click me</button>
+```
+
+turns one victim click into a fully authenticated request **with the CSRF token attached automatically** by the client. A Content-Security-Policy cannot see this: no new script executes, no inline handler is present — it is ordinary markup plus the framework's own listener.
+
+This is not a standalone vulnerability; it requires an HTML-injection precondition, i.e. the application already failed to escape something. It is documented here because **the precondition is cheaper to reach than most people assume, and the consequence is worse**: with delegation, an escaping slip is not a defacement or a script-injection that CSP might catch, it is a state-changing, CSRF-valid POST one click away. Deliberately not "fixed" in the client — restricting delegation to non-injected markup would break `replace`, which exists precisely so server-rendered content stays interactive. The mitigation belongs where the bug is: escape all dynamic template output (`$view->e()` / `e()`, [conventions](conventions.md) security checklist item 6) and treat any HTML-injection finding as high severity in an app built on this client.
 
 ### Events
 
@@ -168,3 +195,5 @@ public function store(Request $request): Response
 3. Keep `resources/assets/js/kalliomicro.js` and `public/assets/js/kalliomicro.js` identical — the `public/` copy is what browsers load.
 4. Never hand-roll CSRF headers — the client injects them on every mutating request.
 5. Prefer `replace()` over `refresh_table` when a partial update suffices — without DataTables, `refresh_table` costs a full page reload.
+6. Endpoints reached by the client must answer `application/json`; a non-JSON body is discarded, not rendered.
+7. Escape every dynamic value in your templates — with document-level delegation, injected markup inherits the framework's authenticated, CSRF-carrying triggers.

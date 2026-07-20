@@ -18,7 +18,6 @@ use RuntimeException;
 class ViewEngine
 {
     private string $viewPath;
-    private string $cachePath;
 
     /** @var array<string, mixed> */
     private array $shared = [];
@@ -41,10 +40,20 @@ class ViewEngine
 
     private ?string $currentSection = null;
 
-    public function __construct(string $viewPath, string $cachePath = '')
+    /**
+     * There is no cache path parameter
+     *
+     * Templates are plain PHP includes — nothing is compiled, so nothing is
+     * cached. The constructor used to take a $cachePath, store it in a private
+     * property with no accessor, and never read it again: not an extension
+     * point, since a downstream could not reach it either, just write-only
+     * state that made the Application compute a storage path for nothing.
+     * PHP ignores surplus arguments to userland functions, so an existing
+     * `new ViewEngine($views, $cache)` call keeps working.
+     */
+    public function __construct(string $viewPath)
     {
         $this->viewPath = rtrim($viewPath, '/');
-        $this->cachePath = $cachePath ? rtrim($cachePath, '/') : sys_get_temp_dir() . '/meso_views';
 
         if (!is_dir($this->viewPath)) {
             throw new RuntimeException("View path does not exist: {$this->viewPath}");
@@ -62,7 +71,13 @@ class ViewEngine
 
         // Each page render starts with a clean slate — otherwise sections
         // captured by an earlier render (e.g. 'scripts') leak into this one.
+        // currentSection/currentLayout are reset for a sharper reason: a render
+        // that threw mid-template never reached endSection() and never cleared
+        // its layout, so this singleton would wrap the next, unrelated page in
+        // a layout it never requested and mis-close the next section.
         $this->sections = [];
+        $this->currentSection = null;
+        $this->currentLayout = null;
 
         // Merge shared data
         $data = array_merge($this->shared, $data);
@@ -95,7 +110,30 @@ class ViewEngine
         $path = $this->resolvePath($template);
         $data = array_merge($this->shared, $data);
 
-        return $this->renderFile($path, $data);
+        // Snapshot rather than test absolutely: a partial rendered from inside
+        // a page would otherwise see the PAGE's layout and report it as its own.
+        $layoutBefore = $this->currentLayout;
+
+        $content = $this->renderFile($path, $data);
+
+        if ($this->currentLayout !== $layoutBefore && $this->currentLayout !== null) {
+            $declared = $this->currentLayout;
+
+            // Don't leave the parent render wrapped in a layout it never asked for
+            $this->currentLayout = $layoutBefore;
+
+            throw new RuntimeException(sprintf(
+                'View [%s] calls extends(\'%s\') but was rendered as a partial. '
+                . 'partial() does no layout handling, so a template that captures '
+                . 'its body into sections returns an empty string and the content '
+                . 'silently disappears. Drop the extends()/section() calls to make '
+                . 'it a real partial, or render it with render() as a full page.',
+                $template,
+                $declared
+            ));
+        }
+
+        return $content;
     }
 
     /**
@@ -178,16 +216,19 @@ class ViewEngine
         // Convert dot notation to path
         $template = str_replace('.', '/', $template);
 
+        // is_file(), not file_exists(): a directory exists, so exists('assessments')
+        // answered true for the folder resources/views/assessments and the render
+        // then failed inside include() instead of with "View not found".
         foreach ($this->extensions as $ext) {
             $path = $this->viewPath . '/' . $template . $ext;
-            if (file_exists($path)) {
+            if (is_file($path) && is_readable($path)) {
                 return $path;
             }
         }
 
         // Try without extension
         $path = $this->viewPath . '/' . $template;
-        if (file_exists($path)) {
+        if (is_file($path) && is_readable($path)) {
             return $path;
         }
 
@@ -201,18 +242,34 @@ class ViewEngine
      */
     private function renderFile(string $__path, array $__data): string
     {
-        // Extract data to local scope
-        extract($__data);
+        // Declared before extract() so EXTR_SKIP protects it like the parameters.
+        $__level = ob_get_level();
 
-        // Make view engine available in templates
+        // Extract data to local scope. EXTR_SKIP is required, not cosmetic:
+        // the default EXTR_OVERWRITE lets a data key named '__path' replace the
+        // include target below with an arbitrary file. Since $__path/$__data
+        // are parameters they already exist, so EXTR_SKIP leaves them intact
+        // and those key names are silently unavailable to templates.
+        extract($__data, EXTR_SKIP);
+
+        // Make view engine available in templates (after extract — not clobberable)
         $view = $this;
 
         ob_start();
 
         try {
-            include $__path;
+            // func_get_arg() re-reads the original argument rather than the
+            // local, so the include target holds even if the guard above moves.
+            include func_get_arg(0);
         } catch (\Throwable $e) {
-            ob_end_clean();
+            // A template that threw inside section() left that buffer open too,
+            // so a single ob_end_clean() discards the section and leaves this
+            // method's own buffer behind — PHP then flushes the aborted page at
+            // shutdown, ahead of the error page. Unwind to the entry depth.
+            while (ob_get_level() > $__level) {
+                ob_end_clean();
+            }
+
             throw $e;
         }
 
@@ -274,11 +331,35 @@ class ViewEngine
      */
     public function e(mixed $value): string
     {
+        return self::escape($value);
+    }
+
+    /**
+     * The single implementation behind both `$view->e()` and the global `e()`
+     * helper, which docs/views.md presents as interchangeable — they drifted
+     * apart (one returned 'Array', the other raised a TypeError) precisely
+     * because each had its own copy of this logic.
+     *
+     * Non-stringable values are rejected rather than coerced: `e($row)` printing
+     * "Array" is a bug that reaches production looking like content, and the
+     * escaping helper is the wrong place to guess what the template meant.
+     */
+    public static function escape(mixed $value): string
+    {
         if ($value === null) {
             return '';
         }
 
-        return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        if (!is_scalar($value) && !$value instanceof \Stringable) {
+            throw new \InvalidArgumentException(
+                'e() expects a string, scalar, Stringable or null; ' . get_debug_type($value) . ' given.'
+            );
+        }
+
+        // ENT_SUBSTITUTE: without it a single invalid UTF-8 byte (legacy
+        // imports are full of them) makes htmlspecialchars return '', blanking
+        // the whole field instead of the one bad character.
+        return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE, 'UTF-8');
     }
 
     /**
@@ -286,7 +367,15 @@ class ViewEngine
      */
     public function js(mixed $value): string
     {
-        return json_encode($value, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+        // JSON_INVALID_UTF8_SUBSTITUTE for the same reason as ENT_SUBSTITUTE
+        // above — without it json_encode returns false on one bad byte, which
+        // this method's string return type turned into an unreadable "Return
+        // value must be of type string" TypeError mid-template. THROW_ON_ERROR
+        // keeps the remaining failures (recursion, INF/NAN) loud but named.
+        return json_encode(
+            $value,
+            JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR
+        );
     }
 
     /**
@@ -294,7 +383,7 @@ class ViewEngine
      */
     public function attr(mixed $value): string
     {
-        return htmlspecialchars((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        return self::escape($value);
     }
 
     /**
@@ -372,7 +461,14 @@ class ViewEngine
             return $this->locale;
         }
 
-        return function_exists('config') ? (string) config('app.locale', 'en') : 'en';
+        // Guarded on the container, not on function_exists('config'):
+        // helpers.php is in composer's autoload.files, so config() is defined
+        // the moment the autoloader runs and that test could never be false.
+        // What actually breaks is config() without an Application — it resolves
+        // through app(), so a bare `new ViewEngine($path)` in a script fataled
+        // with "Call to a member function make() on null". app() is used rather
+        // than importing Application so src/View/ stays standalone.
+        return app() !== null ? (string) config('app.locale', 'en') : 'en';
     }
 
     /**
@@ -388,7 +484,7 @@ class ViewEngine
     {
         $langPath = dirname($this->viewPath) . '/lang';
         $locale = $this->getLocale();
-        $fallback = function_exists('config') ? (string) config('app.fallback_locale', 'en') : 'en';
+        $fallback = app() !== null ? (string) config('app.fallback_locale', 'en') : 'en';
 
         $load = static function (string $loc) use ($langPath): array {
             $file = "{$langPath}/{$loc}.json";

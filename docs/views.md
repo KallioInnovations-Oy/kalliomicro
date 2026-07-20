@@ -7,7 +7,7 @@
 
 ## ViewEngine
 
-Constructed by the Application as a singleton (alias `'view'`) with `resources/views` as the view path. Template names use dot notation: `assessments.form` → `resources/views/assessments/form.php`. Extensions tried: `.php`, `.html.php`. (The constructor's `$cachePath` parameter is currently unused — templates are plain PHP includes, nothing is compiled or cached.)
+Constructed by the Application as a singleton (alias `'view'`) with `resources/views` as the view path. Template names use dot notation: `assessments.form` → `resources/views/assessments/form.php`. Extensions tried: `.php`, `.html.php`. The constructor takes the view path and nothing else — templates are plain PHP includes, so nothing is compiled and there is no cache path to configure.
 
 ### Render flow and layout inheritance
 
@@ -19,7 +19,9 @@ Constructed by the Application as a singleton (alias `'view'`) with `resources/v
 <?php $view->endSection(); ?>
 ```
 
-`render()` starts each page with a **clean sections slate** (a previous render's captured sections never leak into the next), merges shared data under the call data (call data wins), runs registered composers, renders the template, and — if the template called `extends()` — renders the layout with the child's *direct* output injected as `$content`.
+`render()` starts each page from a **clean slate** — captured sections, the open section, and the pending layout are all reset, so neither a previous render's `scripts` section nor a render that *threw* mid-template (leaving `section()`/`extends()` dangling on the singleton) can steer the next page. It then merges shared data under the call data (call data wins), runs registered composers, renders the template, and — if the template called `extends()` — renders the layout with the child's *direct* output injected as `$content`.
+
+**View data cannot collide with the engine's own locals.** Data is extracted with `EXTR_SKIP`, so the keys `__path`, `__data`, `__level`, `view` and `this` are unavailable to templates — they are silently dropped rather than overwriting engine state. This is a security boundary, not a style rule: under the default `EXTR_OVERWRITE` a data key named `__path` replaced the template path the engine was about to `include`, which is arbitrary file inclusion for any project that flattens request input into view data (the natural "repopulate the form" pattern). Pass such a value under any other name.
 
 **Layouts must emit the body via `$view->yield('content', $content ?? '')`, never bare `$content`.** A section-based page captures its entire body into the `content` section, leaving the direct output (and therefore `$content`) empty — a layout echoing bare `$content` renders section-based pages blank. The `$content` argument is only the fallback for templates that emit output without sections:
 
@@ -29,17 +31,27 @@ Constructed by the Application as a singleton (alias `'view'`) with `resources/v
 <?= $view->yield('scripts') ?>
 ```
 
-Other mechanics: `partial($template, $data)` / `include()` render without layout handling; `component($name, $data, $slot)` renders `components/{name}` with `$slot` available (⚠ no `components/` directory ships in the base — the mechanism exists for downstream component libraries); `exists($template)` checks resolvability; `composer($pattern, $callback)` registers pre-render data callbacks (exact or `*` wildcard match).
+A template that throws is unwound cleanly: the engine closes every buffer the aborted render opened (its own and any still-open `section()`), so a half-rendered page is never flushed ahead of the error page.
+
+**`partial()` rejects a template that calls `extends()`.** Rendering without layout handling means a template that captures its body into sections has nowhere to put it — the call returns an empty string and the content silently disappears. So `partial()`, `include()`, `component()` and `Controller::renderPartial()` / `renderToResponse()` throw a `RuntimeException` naming the template and the layout it asked for. Drop the `extends()`/`section()` calls to make it a real partial, or render it with `render()` as a page. (A partial that calls `section()` *without* `extends()` is fine and still works — that is how a partial contributes to a parent page's `scripts` section.)
+
+Other mechanics: `partial($template, $data)` / `include()` render without layout handling; `component($name, $data, $slot)` renders `components/{name}` with `$slot` available (⚠ no `components/` directory ships in the base — the mechanism exists for downstream component libraries); `exists($template)` checks resolvability — a **readable file**, so a directory whose name matches a view (`resources/views/assessments`) is not a template; `composer($pattern, $callback)` registers pre-render data callbacks (exact or `*` wildcard match).
 
 ### Escaping — the XSS rules
 
 ```php
-$view->e($value)     // htmlspecialchars, ENT_QUOTES | ENT_HTML5, UTF-8; null → ''
+$view->e($value)     // htmlspecialchars, ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE, UTF-8; null → ''
 $view->attr($value)  // same flags (attribute contexts)
-$view->js($value)    // json_encode with HEX_TAG|HEX_APOS|HEX_QUOT|HEX_AMP — inline JS values
+$view->js($value)    // json_encode with HEX_TAG|HEX_APOS|HEX_QUOT|HEX_AMP, invalid UTF-8 substituted — inline JS values
 ```
 
 **Every `<?=` emitting dynamic data uses `$view->e()`** (or the global `e()` helper). The only unescaped emissions allowed are developer-authored HTML fragments.
+
+**`$view->e()` and the global `e()` are the same function** — the helper delegates to `ViewEngine::escape()`, so they cannot drift. Their shared contract:
+
+- `null` → `''`; strings, ints, floats, bools and `Stringable` objects are cast and escaped.
+- **Anything else (array, plain object, resource) throws `InvalidArgumentException`.** Escaping is not the place to guess what a template meant: the old lenient path printed the literal text `Array` into the page, a bug that survives review because it looks like content. Pick the field (`$row['name']`), or `implode()` first.
+- Invalid UTF-8 costs you **the bad byte, not the field**. `ENT_SUBSTITUTE` replaces it with U+FFFD; without it `htmlspecialchars` returns `''` and one legacy-imported byte silently blanks the entire value. `js()` uses `JSON_INVALID_UTF8_SUBSTITUTE` for the same reason (plus `JSON_THROW_ON_ERROR`, so recursion or `INF` fails with a named `JsonException` instead of a return-type `TypeError`).
 
 ### Shared data
 

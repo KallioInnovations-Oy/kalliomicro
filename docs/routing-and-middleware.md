@@ -25,41 +25,52 @@ Handlers: `[Controller::class, 'method']` (preferred), a `Closure`, or `'Control
 
 ### Groups
 
-`group(['prefix' => '/app', 'middleware' => […]], fn (Router $router) => …)` — prefixes concatenate and middleware arrays merge (parent first) across arbitrary nesting; state is saved/restored around the callback. **Every group must state its middleware array explicitly** — `/app` and `/api` groups require an auth guard (the shipped route files show the pattern with commented placeholders).
+`group(['prefix' => '/app', 'middleware' => […]], fn (Router $router) => …)` — prefixes concatenate and middleware arrays merge (parent first) across arbitrary nesting; state is saved/restored around the callback in a `finally`, so a callback that throws cannot leak its prefix or middleware onto routes registered after it. **Every group must state its middleware array explicitly** — the shipped route files guard the `/app` group and the protected `/api` section with `AuthMiddleware::class` (401 JSON for `wantsJson()` requests, login redirect for web).
 
 ### Route parameters and constraints
 
-- `{param}` matches one non-slash segment; `{param?}` is optional. Trailing slashes are always optional.
+- `{param}` matches one non-slash segment; `{param?}` makes the **value** optional but not its separator slash — `/users/{id?}` matches `/users/` and `/users/5`, **not** `/users` (register a separate `/users` route for the bare path). Trailing slashes are always optional.
 - Constraints: `->where('id', '[0-9]+')`, `->whereArray()`, `->whereNumber()`, `->whereAlpha()`, `->whereAlphaNumeric()`, `->whereUuid()`; defaults for optional params via `->default('param', 'value')`.
-- Params arrive as string arguments after `$request` (by name), and via `$request->route('param')`.
+- Params arrive as string arguments after `$request` (by name), and via `$request->route('param')`. Captured values are `rawurldecode`d, so a segment sent as `a%2Fb` reaches the handler as `a/b`; `->default()` values are used verbatim.
 
 ### Named routes
 
 `->name('users.show')` names a route; `Router::url($name, $params)` / the global `url()` helper generate URLs from it (names are resolved lazily on first lookup, so registration order doesn't matter). Unknown names throw `RuntimeException`.
 
+Parameter values are `rawurlencode`d into a single path segment — `['id' => 'a/b']` yields `/users/a%2Fb`, not an extra path segment, and a value containing `?` or `#` cannot graft a query string or fragment onto the URL. Generation and extraction round-trip. Omitting a **required** `{param}` throws `InvalidArgumentException` naming the route, the missing parameter and what was given, rather than emitting the literal `/users/{id}`; unfilled `{param?}` placeholders are dropped as before.
+
 ### Dispatch semantics
 
 - Routes match **in registration order, first match wins** — register literal paths before overlapping wildcard paths.
-- Wrong HTTP verb on an existing path → **405 Method Not Allowed** with an `Allow` header listing the valid verbs (JSON body for `wantsJson()` requests, HTML otherwise).
-- No path match at all → 404 (JSON or HTML by the same rule).
-- Controller return values are coerced: `Response` as-is, array/object → JSON, string → HTML, `null` → 204.
+- Literal path text is regex-escaped, so `/files/report.pdf` matches only that path and metacharacters (`.`, `(`, `+`) in a route path are literal. Only `{param}` / `{param?}` placeholders become regex.
+- **`HEAD` is served by the matching `GET` route** (RFC 9110 §9.3.2): route middleware runs, the response keeps all its headers, and the body is stripped — with `Content-Length` set to the length the `GET` body would have had, unless the handler already set one. Registering an explicit `HEAD` route overrides the fallback.
+- **`OPTIONS` on a known path** is auto-answered `204` with an `Allow` header. **Scope note:** this is the `Allow` header only — CORS preflight (`Access-Control-Allow-*`) needs the request `Origin` and a per-deployment policy, so it belongs in middleware, not the router.
+- Wrong HTTP verb on an existing path → **405 Method Not Allowed** with an `Allow` header (JSON body for `wantsJson()` requests, HTML otherwise). `Allow` lists the registered verbs plus `HEAD` (when a `GET` route exists) and `OPTIONS`, since the router answers those without a registered route.
+- No path match at all → 404 (JSON or HTML by the same rule). The `HEAD`/`OPTIONS` fallbacks never resurrect an unknown path.
+- ⚠ **404/405 are decided before route middleware runs** (as of 2026-07-18). An anonymous client can therefore tell a guarded path from a nonexistent one by comparing a 405 against a 404 — the 405 leaks that the path exists behind the guard. Fixing this means moving the match/guard ordering, a routing-architecture change; treat path names as non-secret until then.
+- Handler return values are coerced, and this list is exhaustive: `Response` as-is, array/object → JSON, string → HTML, `null` → 204. **Anything else throws a `RuntimeException` naming the type** — a bare `return false;` used to become a 200 with an empty `text/plain` body, so a refused action read as a success. Send scalars explicitly via `Response::text()`.
 
 ---
 
 ## Middleware
 
-Contract: `KallioMicro\Http\MiddlewareInterface::handle(Request $request, Closure $next): Response`. A middleware short-circuits by returning a `Response` without calling `$next($request)`.
+Contract: `KallioMicro\Middleware\MiddlewareInterface::handle(Request $request, Closure $next): Response`. A middleware short-circuits by returning a `Response` without calling `$next($request)`.
 
 Two tiers:
 
-- **Global middleware** — closures registered with `Application::middleware()` in `public/index.php`; run for every request, outermost-first in registration order. The shipped global middleware starts the session.
-- **Route middleware** — attached to routes/groups. ⚠ `Route::middleware()` accepts **closures only** — class-string middleware is wrapped at the route file:
+- **Global middleware** — registered with `Application::middleware()` in `public/index.php`; run for every request, outermost-first in registration order. The shipped global middleware starts the session. **Error responses go through the stack too**: a route handler that throws has its exception rendered at the destination, so the resulting 404/403/500 still travels back out through every global middleware. Security headers set here therefore survive on error responses. The one unavoidable exception is a middleware that throws *before* calling `$next` — nothing can run the pipeline on its behalf.
+- **Route middleware** — attached to routes/groups via `Route::middleware()` or the group `middleware` array.
+
+Both tiers accept a **closure** (`Closure(Request, Closure): Response`) or a **class-string** of a `MiddlewareInterface` implementation. Class-strings are resolved through the container at dispatch time, so constructor dependencies auto-wire:
 
 ```php
 'middleware' => [
-    fn ($req, $next) => (new AuthMiddleware(app(Session::class)))->handle($req, $next),
+    AuthMiddleware::class,                     // container-resolved, Session auto-wires
+    fn ($req, $next) => (new RoleMiddleware(app(Session::class), 'admin'))->handle($req, $next),
 ],
 ```
+
+Parameterized middleware (variadic roles, a custom `$except` list) keep the closure form — the container cannot guess those arguments. A class-string that doesn't implement `MiddlewareInterface` throws a `RuntimeException` naming the class at dispatch; a nonexistent class throws from the container.
 
 ### Middleware catalog
 
@@ -85,14 +96,14 @@ Roles and `profile_id` are read straight from the session user array — the fra
 - Headers are case-insensitive (`header('x-csrf-token')`); cookies via `cookie()`; uploads via `file()`/`hasFile()`.
 - Content negotiation: `expectsJson()` (Accept), `isJson()` (Content-Type), `isAjax()` (X-Requested-With — kalliomicro.js sets it on every request), `wantsJson()` = either.
 - Route params: `route($key)` / `routeParams()`; middleware-to-controller data: `setAttribute()` / `getAttribute()`.
-- ⚠ **`ip()` blindly trusts `X-Forwarded-For`** (returns its first entry when present, else `REMOTE_ADDR`). Behind anything other than a trusted proxy that overwrites the header, the client controls this value — do not use it for security decisions without infrastructure guarantees.
+- **`ip()` requires trusted proxies for `X-Forwarded-For`.** By default (empty `app.trusted_proxies`) it returns `REMOTE_ADDR` and ignores XFF entirely. When `REMOTE_ADDR` is listed in `app.trusted_proxies` (exact-match IPs), the client is the **rightmost** XFF entry that is not itself a trusted proxy — the first entry is client-forgeable, since proxies append. No CIDR support; list each proxy IP. **Scope note:** proxy awareness covers `ip()` only — `isSecure()`, `url()`, and the `Host` header do **not** consult `X-Forwarded-Proto`/`X-Forwarded-Host`; behind a TLS-terminating proxy, configure the proxy to pass `Host` through and terminate scheme decisions at the infrastructure.
 
 ## Response
 
 `KallioMicro\Http\Response` factories:
 
 ```php
-Response::json(array|object $data, int $status = 200)   // JSON_UNESCAPED_UNICODE, throws on encode failure
+Response::json(array|object $data, int $status = 200, int $flags = 0)   // $flags OR'd with JSON_UNESCAPED_UNICODE; throws on encode failure
 Response::html(string $content, int $status = 200)
 Response::text(string $content, int $status = 200)
 Response::noContent()                                   // 204
@@ -129,7 +140,7 @@ protected function wantsJson(): bool
 
 // CSRF
 protected function verifyCsrf(): bool     // csrf_token field OR X-CSRF-Token header, hash_equals
-protected function requireCsrf(): void    // throws on mismatch — see ⚠ below
+protected function requireCsrf(): void    // throws on mismatch — see note below
 
 // Auth
 protected function isAuthenticated(): bool
@@ -148,7 +159,7 @@ protected function table(string $table): QueryBuilder
 
 **Every state-changing method (store/update/destroy) calls `$this->requireCsrf()` as its first line.** It throws `RuntimeException('CSRF token mismatch', 403)`, which the exception handler renders as a proper 403. An empty `csrf_token` field never shadows the `X-CSRF-Token` header (both `verifyCsrf()` and `CsrfMiddleware` fall through on null *or* empty).
 
-⚠ Caveat (as of 2026-07-14): `back()` redirects to the raw `Referer` header (default `/`) — it does not verify same-origin; don't use it after security-sensitive actions.
+`back()` is same-origin safe: a cross-origin `Referer` host falls back to `/`, and a same-origin (or relative) referer is reduced to path + query via `Session::sanitizeRelativeUrl()` before redirecting. The sanitizer applies its protocol-relative, backslash and control-character guards *after* reducing an absolute URL, because `parse_url()` can itself yield a protocol-relative path — `https://victimhost//evil.example/x` passes a naive same-origin check and used to reduce to `//evil.example/x`. Missing `Referer` (or missing `Host` header) → `/`; bracketed IPv6 hosts compare correctly. The comparison uses the `Host` header the backend sees — behind a proxy that rewrites `Host`, same-origin referers are treated as cross-origin (configure `proxy_set_header Host $host` or accept the `/` fallback).
 
 There are **no** `can()` / `hasRole()` / `authorize()` helpers on the controller — role checks go through the session user (`$this->user()['roles']`) or route-level `RoleMiddleware`; permission systems are a downstream concern.
 

@@ -2,7 +2,7 @@
 
 > Sources: `src/Core/`, `src/Support/`, `public/index.php`, `console`, `config/`, `composer.json`.
 
-KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.0.0'`). One production dependency: `phpmailer/phpmailer`. Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
+KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION = '1.2.4'`; behavior changes are tracked in the root [CHANGELOG.md](../CHANGELOG.md)). One production dependency: `phpmailer/phpmailer` (PHPUnit ships as require-dev only — `composer test`). Everything else — DI container, router, query builder, auth, view engine, console — is implemented in `src/`.
 
 ## Design philosophy
 
@@ -18,10 +18,10 @@ KallioMicro is a minimal, secure PHP 8.1+ MVC framework (`Application::VERSION =
 | `src/Core/` | nothing | `Application`, `Container`, `Config` |
 | `src/Database/` | standalone | `Connection`, `QueryBuilder` (+ `RawExpression`) |
 | `src/View/` | standalone | `ViewEngine` |
-| `src/Http/` | Core, Database, View, Auth | `Request`, `Response`, `ApiResponse`, `Controller`, `HttpException`, `MiddlewareInterface` |
+| `src/Http/` | Core, Database, View, Auth | `Request`, `Response`, `ApiResponse`, `Controller`, `HttpException` |
 | `src/Routing/` | Core, Http | `Router`, `Route` |
 | `src/Auth/` | Core, Database | `AuthManager` (+ `AuthResult`, provider interfaces), `Providers/`, `Session` |
-| `src/Middleware/` | Http, Auth | `Auth`/`Guest`/`Role`/`Profile`/`Csrf` middleware |
+| `src/Middleware/` | Http, Auth | `MiddlewareInterface`, abstract `Middleware`, `Auth`/`Guest`/`Role`/`Profile`/`Csrf` middleware (one class per file — required for PSR-4 class-string resolution) |
 | `src/Console/` | Core, Support | `Console` kernel, `Command`, `Input`, built-in commands |
 | `src/Support/` | Core | `helpers.php`, `DotEnv`, `Logger`, `ExceptionHandler`, `Communicator` |
 
@@ -50,10 +50,13 @@ Resolution rules:
 - Closure bindings are invoked as `$concrete($this, $parameters)`; string bindings and unbound classes are reflection-built. Constructor params resolve in order: explicit `$parameters` by name → typed class dependency (recursive `make()`) → default value → `null` for nullable → `RuntimeException`.
 - **Unbound, non-singleton classes are built fresh on every `make()`** — only `singleton()` bindings (and `instance()`) are cached.
 - `has()` returns `false` for classes that are merely autowirable but unbound.
+- **Re-binding wins over anything already resolved:** `bind()`/`singleton()` drop the cached instance for that abstract (and `bind()` also clears the singleton flag, downgrading to fresh-per-`make()`), so an override registered after a resolve takes effect instead of being silently ignored. `instance()` likewise overwrites — the ordering of registrations no longer decides which implementation you get.
 
 `KallioMicro\Core\Application` extends the container and adds: path helpers (`basePath`, `configPath`, `publicPath`, `resourcePath`, `storagePath`), a static instance accessor (used by the `app()` helper), and the HTTP kernel (`handle()`, `run()`, global middleware).
 
 The `Application` constructor self-registers five core singletons with string aliases: `Config` (`'config'`), `Router` (`'router'`), `Request` (`'request'`, via `Request::capture()`), `ViewEngine` (`'view'`), `Session` (`'session'`).
+
+`boot()` registers two more, each **only if the binding is unclaimed**, so anything you bind first wins: `Logger` (file, `storage/logs/app.log`) and `ExceptionHandler` (debug from `config('app.debug')`, wired to that `Logger`). See [Error handling](#error-handling--kalliomicrosupportexceptionhandler) below.
 
 `registerDatabase(string $name, array $config)` binds `"db.{name}"` connections from `config/database.php`; the connection named `default` — or the first one registered — is aliased to `Connection::class` and `'db'`.
 
@@ -63,10 +66,14 @@ The `Application` constructor self-registers five core singletons with string al
 
 Two layers, with a hard rule between them:
 
-1. **`.env` → `env()`** — `KallioMicro\Support\DotEnv` parses `.env` at the repo root (`safeLoad()` — a missing file is fine; `load()` throws) into `$_ENV`/`putenv` without overwriting existing values. Values are stored as **strings**; type coercion (`'true'` → `true`, `'false'` → `false`, `'null'` → `null`, `'empty'` → `''`, parenthesized variants too) happens in the `env()` *helper*, not the loader. `required([...])` throws when listed keys are absent.
+1. **`.env` → `env()`** — `KallioMicro\Support\DotEnv` parses `.env` at the repo root (`safeLoad()` — a missing file is fine; `load()` throws) into `$_ENV`/`putenv` without overwriting existing values. Values are stored as **strings**; type coercion (`'true'` → `true`; `'false'`, `'off'`, `'no'`, `'disabled'` → `false`; `'null'` → `null`; `'empty'` → `''`; case-insensitive, parenthesized variants too) happens in the `env()` *helper*, not the loader. The extra negative words matter: an uncoerced `'off'` is a non-empty — therefore truthy — string, so `APP_DEBUG=off` would enable debug. Positive words other than `true` (`on`, `yes`) are **not** coerced; they stay truthy strings. `required([...])` throws when listed keys are absent.
+
+   Quoted values may carry an inline comment (`KEY="value"  # note`): the parser locates the closing quote rather than checking whether the line ends with one, so a value is multiline only when its quote genuinely does not close on that line. An **unterminated quote raises** — previously it absorbed every following line and discarded the rest of the file with no error, which silently booted the app in debug mode against whatever database `config/` defaulted to. There is no variable interpolation: `KEY="${OTHER}"` stores the literal `${OTHER}`.
 2. **`config/*.php` → `config()`** — `KallioMicro\Core\Config` eagerly `require`s every `config/*.php`; the file basename is the top-level key and dot notation reads into it (`config('app.debug')`). Also implements `ArrayAccess`.
 
 **Rule: `env()` may only be called inside `config/*.php`** (exception: entry-script crash handlers, where config may not be loadable). Application code reads `config()`.
+
+**`app.timezone` is applied by `Application::boot()`** via `date_default_timezone_set()`, so `date()` and `DateTime` follow it rather than php.ini. An unknown identifier throws instead of falling back — a whole application quietly running on the wrong clock is the failure being prevented. Set it to `UTC` if you want timestamps to match `UTC_TIMESTAMP()` (see the server-expectations note in [database.md](database.md)). `app.name` and `app.env` are read by **application** code only; the framework does not consume them.
 
 Config files shipped: `app` (name, env, debug, url, timezone `Europe/Helsinki`, locale), `auth` (default provider + `local`/`entra`/`ldap`/`google` provider config), `database` (default + connections), `session` (cookie, lifetime, secure, http_only, same_site, domain, regenerate_interval). Add new config surfaces as new files in `config/`.
 
@@ -90,17 +97,36 @@ require routes/web.php + routes/api.php
 $app->run()
 ```
 
-`run()` captures the `Request`, runs `handle()` (boot → global middleware pipeline, outermost-first in registration order → `Router::dispatch()`), sends the `Response`, then `terminate()` (no-op hook). Any `Throwable` inside `handle()` renders a 500 — JSON (`{error, message[, trace]}`) for `expectsJson()` requests, HTML otherwise; message and trace are exposed only when `config('app.debug')` is true.
+`run()` captures the `Request`, runs `handle()` (boot → global middleware pipeline, outermost-first in registration order → `Router::dispatch()`), sends the `Response`, then `terminate($request, $response)` — a **post-response extension point**, empty in the base. Override it on an `Application` subclass for work that should not sit between the handler and the client (metrics, an access record, closing a queue connection); both objects are passed so it can see what was served. ⚠ "After the response is sent" is not "off the request clock" — PHP only detaches the client under FPM, and only via `fastcgi_finish_request()`; under mod_php, the built-in server or CLI the browser waits through it. Keep it short. A `Throwable` inside `handle()` is rendered by `ExceptionHandler` (see below) at the status `getHttpCode()` maps it to — not a blanket 500, so `abort()` and `HttpException` surface correctly — as JSON for `expectsJson()` requests and HTML otherwise. Rendering happens **at the destination**, so the error response travels back out through the global middleware stack like any other.
 
 ### CLI — `console`
 
-Guards `PHP_SAPI === 'cli'`, defines `KALLIOMICRO_BASE_PATH`, locates the composer autoloader, loads `.env` + helpers, creates the `Application`, a file-only `Logger` (`storage/logs/console.log`), and an `ExceptionHandler` (debug from `config('app.debug')`), then registers commands and scheduled tasks explicitly before `$console->run($argv)`. Exit code = the command's return value. See [console.md](console.md).
+Guards `PHP_SAPI === 'cli'`, defines `KALLIOMICRO_BASE_PATH` (an **application-layer** convenience for `app/` commands — framework code in `src/` never reads it; `Application`'s path helpers are the base-path authority), locates the composer autoloader, loads `.env` + helpers, creates the `Application`, a file-only `Logger` (`storage/logs/console.log`), and an `ExceptionHandler` (debug from `config('app.debug')`), then registers commands and scheduled tasks explicitly before `$console->run($argv)`. Exit code = the command's return value. See [console.md](console.md).
 
 ### Error handling — `KallioMicro\Support\ExceptionHandler`
 
 Registers exception/error/shutdown handlers. Rendering: CLI → colored STDERR (exit 1); JSON-wanting requests → JSON (debug adds exception/file/line/trace); web → full debug page in debug mode, generic error page otherwise. Paths listed via `setHiddenPaths()` are redacted in traces. Critical errors (`Error`, `PDOException`, `RuntimeException`) can notify Teams via `Communicator` when `notifyOnCritical` is enabled.
 
 Status-code mapping (`getHttpCode`, public): `HttpException` → its status code; any exception whose `code` is an int in 400–599 → that status (`throw new RuntimeException('...', 403)` renders as 403); `InvalidArgumentException` → 400; everything else → 500. `HttpException` remains the preferred way to abort with a specific status.
+
+**Request-path exceptions are reported as well as rendered.** `Application::handleException()` calls `report()` (log + critical notification) before `render()`. Previously only the globally-registered handler logged, and `public/index.php` does not register one — so a production 500 was rendered to the visitor and left no trace anywhere. Reporting is best-effort and guarded twice: `report()` swallows its own failures, and the call site catches as well, because a database-backed handler throwing when the database is down is a normal reason for the 500 in the first place. A reporter that fails must not cost the visitor the error page.
+
+`Application::boot()` binds a **default file `Logger`** (`storage/logs/app.log`) if nothing else claimed `Logger::class`, and passes it to the default `ExceptionHandler` — without a logger, `report()` has nowhere to write and every handled exception is discarded. Bind your own `Logger` (database-backed, a different channel) and the error handler picks it up.
+
+**It is the only error renderer.** `Application::handleException()` resolves `ExceptionHandler` from the container and delegates, so a web request and the registered global handler cannot disagree about escaping, trace contents, or what a production response is allowed to say. Bind your own instance (custom renderer, hidden paths, a logger) before the first request to replace the default; `Application::boot()` only registers one if the binding is unclaimed.
+
+The seam for that is **`Application::booting(Closure $callback)`** — callbacks registered with it run at the top of `boot()`, before the default `ExceptionHandler` binding is considered, so a callback that binds its own wins:
+
+```php
+$app->booting(function (Application $app): void {
+    $app->instance(ExceptionHandler::class, (new ExceptionHandler($logger, null, $debug))
+        ->setHiddenPaths([$app->basePath()]));
+});
+```
+
+Registering services directly in `public/index.php` (the usual case) needs no callback — `booting()` exists for wiring that must be deferred until boot time, or that a shared bootstrap file wants to contribute without owning the entry point.
+
+**Survivability**, because an error page that crashes is worse than useless: the error handler is registered with a level mask, so a warning raised *inside* it — the classic being `file_put_contents` failing when the log directory is unwritable — no longer becomes an `ErrorException` that escapes and destroys the original error. A re-entrancy guard stops `handleShutdown()` re-entering on a fatal the handler itself produced (which printed every crash twice), logging and notification failures are swallowed rather than replacing the exception being reported, and headers are only emitted when `headers_sent()` is false, so an exception raised mid-render appends to the partial output instead of cascading.
 
 ---
 
@@ -110,7 +136,7 @@ Global functions (each guarded by `function_exists`):
 
 | Helper | Behavior |
 |---|---|
-| `env($key, $default)` | `$_ENV`/`getenv` with true/false/null/empty coercion — **config files only** |
+| `env($key, $default)` | `$_ENV`/`getenv` with true/false/off/no/disabled/null/empty coercion — **config files only** |
 | `app($abstract = null)` | Application instance, or `make($abstract)` |
 | `config($key, $default)` | Dot-notation config read |
 | `view($template, $data)` | Render a template to string |
@@ -126,8 +152,8 @@ Global functions (each guarded by `function_exists`):
 
 Other Support classes:
 
-- **`Logger`** — DB (`core_logs`: origdate, user_id, rowtype, logsource, logsourceid, eventtype, eventdescription) or file (`storage/logs/app.log`); KallioMicro levels `0=BYPASS, 1=SUCCESS, 2=INFO, 3=WARNING, 4=ERROR` plus PSR-3 method names mapped onto them; `{key}` context interpolation; per-channel clones via `channel()`; DB failure falls back to file.
-- **`Communicator`** — SMTP email via PHPMailer (`sendEmail`), Microsoft Teams (`sendTeamsNotification`), Slack (`sendSlackNotification`), generic webhooks (`sendWebhook`; TLS verification on). Returns `CommunicatorResult` (`isSuccess()`/`isFailure()`). Config from `MAIL_*` / `WEBHOOK_*` env by default.
+- **`Logger`** — DB (`core_logs`: origdate, user_id, rowtype, logsource, logsourceid, eventtype, eventdescription, context) or file (`storage/logs/app.log`); KallioMicro levels `0=BYPASS, 1=SUCCESS, 2=INFO, 3=WARNING, 4=ERROR` plus PSR-3 method names mapped onto them; `{key}` context interpolation; per-channel clones via `channel()`; DB failure falls back to file. The DDL for `core_logs` is in [`database/schema.sql`](../database/schema.sql) — the column list is a contract, and a mismatch makes every insert fail 42S22 and fall back to file. CR/LF in the message, source and source id are escaped so one call can never write more than one line (log-injection defence), and the special context keys `user_id`/`source_id`/`source` are coerced rather than trusted — a wrong-typed value used to raise a `TypeError` out of the logger and kill its caller.
+- **`Communicator`** — SMTP email via PHPMailer (`sendEmail`), Microsoft Teams (`sendTeamsNotification`), Slack (`sendSlackNotification`), generic webhooks (`sendWebhook`; TLS verification on). Returns `CommunicatorResult` (`isSuccess()`/`isFailure()`). Config from `config/notifications.php` (`notifications.email` / `notifications.webhooks`, populated from `MAIL_*` / `WEBHOOK_*` env); constructor arguments merge *over* that, so a partial array overrides only the keys it names.
 - **`DotEnv`** — see above.
 
 ---

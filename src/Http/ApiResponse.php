@@ -508,7 +508,23 @@ class ApiResponse
      */
     public function toJson(int $flags = 0): string
     {
-        return json_encode($this->toArray(), $flags | JSON_UNESCAPED_UNICODE);
+        try {
+            return json_encode(
+                $this->toArray(),
+                $flags | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
+            );
+        } catch (\JsonException $e) {
+            // Without JSON_THROW_ON_ERROR, an unencodable payload (malformed
+            // UTF-8 from a legacy column, a resource, recursion) makes
+            // json_encode() return false — a TypeError against this string
+            // return type under strict_types, i.e. a 500 whose message says
+            // nothing about the payload. Fail with the real cause named.
+            throw new \RuntimeException(
+                'ApiResponse payload could not be encoded as JSON: ' . $e->getMessage(),
+                0,
+                $e
+            );
+        }
     }
 
     /**

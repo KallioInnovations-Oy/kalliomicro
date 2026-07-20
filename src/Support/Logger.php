@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KallioMicro\Support;
 
+use KallioMicro\Core\Application;
 use KallioMicro\Database\Connection;
 
 /**
@@ -90,8 +91,22 @@ class Logger
 
     private function getDefaultLogPath(): string
     {
-        $basePath = defined('KALLIOMICRO_BASE_PATH') ? KALLIOMICRO_BASE_PATH : dirname(__DIR__, 2);
-        return $basePath . '/storage/logs/app.log';
+        // Application owns the base path. This used to read a
+        // KALLIOMICRO_BASE_PATH constant, which framework code has no business
+        // depending on: only the console entry script defines it, and that
+        // script passes an explicit log path — so the guard could never be
+        // true and the branch never ran. The web entry point, which is the one
+        // that actually reaches this default, never defined it at all.
+        $app = Application::getInstance();
+
+        if ($app !== null) {
+            return $app->storagePath('logs/app.log');
+        }
+
+        // No Application yet — a Logger built by an entry-script crash handler
+        // before boot. Assumes src/ sits at the project root, per the
+        // downstream base contract in docs/conventions.md.
+        return dirname(__DIR__, 2) . '/storage/logs/app.log';
     }
 
     /**
@@ -122,10 +137,20 @@ class Logger
         // Interpolate context into message
         $message = $this->interpolate($message, $context);
 
-        // Extract special context values
-        $userId = $context['user_id'] ?? $this->getUserId();
-        $sourceId = $context['source_id'] ?? null;
-        $source = $context['source'] ?? $this->channel;
+        // Extract special context values, coercing rather than trusting the
+        // caller's types. These are read as mixed and handed to int/?string/
+        // string parameters under strict_types, so a context value of the
+        // wrong type used to raise a TypeError out of write() — outside
+        // writeToDatabase()'s try/catch, so it killed the caller instead of
+        // falling back to file. A logging call must never do that, least of
+        // all from inside ExceptionHandler::logException().
+        $userId = $this->toInt($context['user_id'] ?? null) ?? $this->getUserId();
+        $sourceId = isset($context['source_id']) && is_scalar($context['source_id'])
+            ? (string) $context['source_id']
+            : null;
+        $source = isset($context['source']) && is_scalar($context['source'])
+            ? (string) $context['source']
+            : $this->channel;
 
         // Remove special keys from context
         unset($context['user_id'], $context['source_id'], $context['source']);
@@ -135,6 +160,35 @@ class Logger
         } else {
             $this->writeToDatabase($level, $source, $message, $sourceId, $userId, $context);
         }
+    }
+
+    /**
+     * Coerce a context value to an int, or null when it cannot be one
+     */
+    private function toInt(mixed $value): ?int
+    {
+        if (is_int($value)) {
+            return $value;
+        }
+
+        if (is_string($value) && ctype_digit($value)) {
+            return (int) $value;
+        }
+
+        return null;
+    }
+
+    /**
+     * Flatten CR/LF so one log call cannot write more than one line
+     *
+     * Without this, any consumer logging a username, a URL or an exception
+     * message carrying user input can forge audit entries byte-identical in
+     * shape to genuine ones — verified producing three lines from two calls,
+     * the middle one entirely fabricated.
+     */
+    private function singleLine(string $value): string
+    {
+        return str_replace(["\r\n", "\r", "\n"], ['\r\n', '\r', '\n'], $value);
     }
 
     /**
@@ -162,6 +216,9 @@ class Logger
                 'logsourceid' => $sourceId,
                 'eventtype' => $eventType,
                 'eventdescription' => $message,
+                // Was computed and then dropped on the floor, so structured
+                // context vanished on the DB path while the file path kept it
+                'context' => $contextJson,
             ]);
 
             return true;
@@ -196,17 +253,19 @@ class Logger
     ): bool {
         $levelName = self::LEVEL_NAMES[$level] ?? 'UNKNOWN';
         $timestamp = date('Y-m-d H:i:s');
-        $sourceIdPart = $sourceId ? " [{$sourceId}]" : '';
+        $sourceIdPart = $sourceId ? ' [' . $this->singleLine($sourceId) . ']' : '';
+
+        // json_encode already escapes newlines, so the context part is safe
         $contextPart = !empty($context) ? ' ' . json_encode($context) : '';
 
         $logLine = sprintf(
             "[%s] [%s] [%s]%s [user:%d] %s%s\n",
             $timestamp,
             $levelName,
-            $source,
+            $this->singleLine($source),
             $sourceIdPart,
             $userId,
-            $message,
+            $this->singleLine($message),
             $contextPart
         );
 

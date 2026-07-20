@@ -43,6 +43,9 @@ class Request
     /** @var array<string, string> */
     private array $routeParams = [];
 
+    /** @var string[] Peers (REMOTE_ADDR, exact match) whose X-Forwarded-For may be trusted */
+    private array $trustedProxies = [];
+
     /**
      * @param array<string, mixed> $query
      * @param array<string, mixed> $post
@@ -459,16 +462,39 @@ class Request
 
     // Client info
 
+    /**
+     * @param string[] $proxies
+     */
+    public function setTrustedProxies(array $proxies): void
+    {
+        $this->trustedProxies = $proxies;
+    }
+
     public function ip(): ?string
     {
-        // Check for forwarded IP (from proxy/load balancer)
-        $forwarded = $this->header('x-forwarded-for');
-        if ($forwarded) {
-            $ips = array_map('trim', explode(',', $forwarded));
-            return $ips[0] ?? null;
+        $remote = $this->server['REMOTE_ADDR'] ?? null;
+
+        // X-Forwarded-For is client-supplied; honor it only when the direct
+        // peer is a configured proxy (app.trusted_proxies, default: none).
+        if ($remote === null || !in_array($remote, $this->trustedProxies, true)) {
+            return $remote;
         }
 
-        return $this->server['REMOTE_ADDR'] ?? null;
+        $forwarded = $this->header('x-forwarded-for');
+        if ($forwarded === null || $forwarded === '') {
+            return $remote;
+        }
+
+        // Proxies append to the chain, so the first entry may be forged by the
+        // client. The rightmost entry that is not itself a trusted proxy is the
+        // real client address.
+        foreach (array_reverse(array_map('trim', explode(',', $forwarded))) as $ip) {
+            if ($ip !== '' && !in_array($ip, $this->trustedProxies, true)) {
+                return $ip;
+            }
+        }
+
+        return $remote;
     }
 
     public function userAgent(): ?string

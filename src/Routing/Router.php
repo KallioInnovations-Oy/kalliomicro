@@ -30,12 +30,9 @@ class Router
     /** @var array<string, Route> */
     private array $namedRoutes = [];
 
-    /** @var array<string, Closure[]> */
-    private array $groupMiddleware = [];
-
     private string $currentGroupPrefix = '';
 
-    /** @var Closure[] */
+    /** @var array<int, Closure|string> */
     private array $currentGroupMiddleware = [];
 
     public function __construct(Application $app)
@@ -142,7 +139,8 @@ class Router
     /**
      * Create a route group with shared attributes
      *
-     * @param Closure[] $middleware
+     * The 'middleware' attribute takes closures or MiddlewareInterface
+     * class-strings, same as Route::middleware().
      */
     public function group(array $attributes, Closure $callback): void
     {
@@ -155,10 +153,17 @@ class Router
             $attributes['middleware'] ?? []
         );
 
-        $callback($this);
-
-        $this->currentGroupPrefix = $previousPrefix;
-        $this->currentGroupMiddleware = $previousMiddleware;
+        try {
+            $callback($this);
+        } finally {
+            // Restore in finally: a callback that throws (a typo'd controller
+            // class, a failing config lookup) otherwise leaked its prefix and
+            // middleware onto every route registered after it — a caught
+            // exception during boot silently re-homed the rest of the route
+            // file under /admin, with the group's auth middleware attached.
+            $this->currentGroupPrefix = $previousPrefix;
+            $this->currentGroupMiddleware = $previousMiddleware;
+        }
     }
 
     /**
@@ -178,14 +183,6 @@ class Router
         $this->routes[] = $route;
 
         return $route;
-    }
-
-    /**
-     * Register a named route for URL generation
-     */
-    public function registerNamed(string $name, Route $route): void
-    {
-        $this->namedRoutes[$name] = $route;
     }
 
     /**
@@ -222,6 +219,7 @@ class Router
         $path = $request->path();
 
         $allowedMethods = [];
+        $headFallback = null;
 
         foreach ($this->routes as $route) {
             if ($route->matches($method, $path)) {
@@ -233,14 +231,73 @@ class Router
 
             if ($route->matchesPath($path)) {
                 $allowedMethods[$route->getMethod()] = true;
+
+                if ($headFallback === null && $method === 'HEAD' && $route->getMethod() === 'GET') {
+                    $headFallback = $route;
+                }
             }
         }
 
-        if ($allowedMethods !== []) {
-            return $this->handleMethodNotAllowed($request, array_keys($allowedMethods));
+        if ($allowedMethods === []) {
+            return $this->handleNotFound($request);
         }
 
-        return $this->handleNotFound($request);
+        // RFC 9110 §9.3.2: HEAD is GET without a body. Answering it 405 broke
+        // `curl -I` and most uptime monitors, which probe with HEAD and read a
+        // 405 as an outage. An explicitly registered HEAD route still wins —
+        // this only runs once nothing matched the verb as given.
+        if ($headFallback !== null) {
+            $request->setRouteParams($headFallback->extractParams($path));
+
+            return $this->withoutBody($this->runRoute($headFallback, $request));
+        }
+
+        // RFC 9110 §9.3.7: OPTIONS on a known path answers with Allow, not 405.
+        // Deliberately just the Allow header — CORS preflight needs the request
+        // Origin and per-deployment policy, so it stays a middleware concern.
+        if ($method === 'OPTIONS') {
+            return Response::noContent()
+                ->header('Allow', $this->allowHeader($allowedMethods));
+        }
+
+        return $this->handleMethodNotAllowed($request, $allowedMethods);
+    }
+
+    /**
+     * Strip the body from a HEAD response, keeping its headers intact
+     */
+    private function withoutBody(Response $response): Response
+    {
+        // RFC 9110 §9.3.2: a HEAD response carries the headers GET would have
+        // sent. Content-Length is the one header that cannot survive on its
+        // own — send() emits no body, so nothing downstream would compute it.
+        if ($response->getHeader('Content-Length') === null) {
+            $response->header('Content-Length', (string) strlen($response->getContent()));
+        }
+
+        return $response->content('');
+    }
+
+    /**
+     * Build the Allow header value for a path
+     *
+     * @param array<string, true> $allowedMethods verbs with a route on this path
+     */
+    private function allowHeader(array $allowedMethods): string
+    {
+        $allow = array_keys($allowedMethods);
+
+        // Both are answered by dispatch() above without a registered route, so
+        // omitting them would advertise less than the router actually serves.
+        if (isset($allowedMethods['GET']) && !isset($allowedMethods['HEAD'])) {
+            $allow[] = 'HEAD';
+        }
+
+        if (!isset($allowedMethods['OPTIONS'])) {
+            $allow[] = 'OPTIONS';
+        }
+
+        return implode(', ', $allow);
     }
 
     /**
@@ -249,7 +306,7 @@ class Router
     private function runRoute(Route $route, Request $request): Response
     {
         $handler = $route->getHandler();
-        $middleware = $route->getMiddleware();
+        $middleware = array_map($this->app->resolveMiddleware(...), $route->getMiddleware());
 
         // Build middleware pipeline
         $pipeline = array_reduce(
@@ -297,6 +354,8 @@ class Router
 
     /**
      * Convert handler result to Response
+     *
+     * The documented set is exactly: Response, array/object, string, null.
      */
     private function toResponse(mixed $result): Response
     {
@@ -316,7 +375,16 @@ class Router
             return Response::noContent();
         }
 
-        return Response::text((string) $result);
+        // The (string) cast used to invent a response for anything else, and
+        // the worst case was silent: a guard clause returning false shipped a
+        // 200 with an empty text/plain body, so a refused action looked like a
+        // success to the client. Undocumented return types are a mistake in the
+        // handler — say so rather than guessing an HTTP semantic for them.
+        throw new RuntimeException(sprintf(
+            'Route handler returned %s; expected Response, array, object, string, or null '
+            . '(use Response::text() to send a scalar).',
+            get_debug_type($result)
+        ));
     }
 
     /**
@@ -337,11 +405,11 @@ class Router
     /**
      * Handle 405 Method Not Allowed (path exists under a different HTTP method)
      *
-     * @param string[] $allowedMethods
+     * @param array<string, true> $allowedMethods verbs with a route on this path
      */
     private function handleMethodNotAllowed(Request $request, array $allowedMethods): Response
     {
-        $allow = implode(', ', $allowedMethods);
+        $allow = $this->allowHeader($allowedMethods);
 
         if ($request->wantsJson()) {
             return Response::json([

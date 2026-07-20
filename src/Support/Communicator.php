@@ -21,6 +21,21 @@ use PHPMailer\PHPMailer\Exception as PHPMailerException;
  */
 class Communicator
 {
+    /**
+     * Last-resort floor for the email settings, guaranteeing every key
+     * sendEmail() reads exists even with no config file and no caller config.
+     * Deployment values belong in config/notifications.php, not here.
+     */
+    private const EMAIL_FALLBACKS = [
+        'host' => 'localhost',
+        'port' => 587,
+        'username' => '',
+        'password' => '',
+        'encryption' => 'tls',
+        'from_address' => 'noreply@example.com',
+        'from_name' => 'KallioMicro',
+    ];
+
     private ?Logger $logger;
     private array $emailConfig;
     private array $webhookConfig;
@@ -28,29 +43,44 @@ class Communicator
     public function __construct(?Logger $logger = null, array $emailConfig = [], array $webhookConfig = [])
     {
         $this->logger = $logger;
-        $this->emailConfig = $emailConfig ?: $this->getDefaultEmailConfig();
-        $this->webhookConfig = $webhookConfig ?: $this->getDefaultWebhookConfig();
+
+        // Merge, never swap. sendEmail() reads port/encryption/from_address
+        // unguarded, so a caller passing only ['host' => ...] used to drop the
+        // other six keys; the resulting "Undefined array key" warnings become
+        // ErrorExceptions once an ExceptionHandler is registered, and those
+        // escape the PHPMailerException-only catch below — breaking this
+        // class's contract that every method returns a CommunicatorResult.
+        $this->emailConfig = array_merge(
+            self::EMAIL_FALLBACKS,
+            $this->configured('notifications.email'),
+            $emailConfig
+        );
+
+        // Same shape, milder symptom (webhook reads are ?? guarded): a caller
+        // passing only ['teams' => ...] used to lose the configured Slack URL.
+        $this->webhookConfig = array_merge($this->configured('notifications.webhooks'), $webhookConfig);
     }
 
-    private function getDefaultEmailConfig(): array
+    /**
+     * Read a config section, tolerating the absence of a booted Application —
+     * Communicator is usable from a bare script (`new Communicator($logger)`),
+     * where config() would fatal on a null container. No container simply means
+     * no configured values, and the fallbacks above still apply.
+     *
+     * @return array<string, mixed>
+     */
+    private function configured(string $key): array
     {
-        return [
-            'host' => env('MAIL_HOST', 'localhost'),
-            'port' => (int) env('MAIL_PORT', 587),
-            'username' => env('MAIL_USERNAME', ''),
-            'password' => env('MAIL_PASSWORD', ''),
-            'encryption' => env('MAIL_ENCRYPTION', 'tls'),
-            'from_address' => env('MAIL_FROM_ADDRESS', 'noreply@example.com'),
-            'from_name' => env('MAIL_FROM_NAME', 'KallioMicro'),
-        ];
-    }
+        // Only the container is worth testing: helpers.php is in composer's
+        // autoload.files, so config() is always defined by the time any
+        // KallioMicro class can load.
+        if (\KallioMicro\Core\Application::getInstance() === null) {
+            return [];
+        }
 
-    private function getDefaultWebhookConfig(): array
-    {
-        return [
-            'teams' => env('WEBHOOK_TEAMS', ''),
-            'slack' => env('WEBHOOK_SLACK', ''),
-        ];
+        $values = config($key, []);
+
+        return is_array($values) ? $values : [];
     }
 
     /**

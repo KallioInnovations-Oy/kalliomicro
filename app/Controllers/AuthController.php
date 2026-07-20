@@ -24,6 +24,8 @@ class AuthController extends Controller
 
     public function login(Request $request): Response
     {
+        $this->requireCsrf();
+
         $validation = $this->validate([
             'username' => 'required|string',
             'password' => 'required|string',
@@ -79,7 +81,10 @@ class AuthController extends Controller
         return $this->redirect('/login');
     }
 
-    public function redirect(Request $request, string $provider): Response
+    // Named redirectToProvider because the Controller base already defines the
+    // redirect(string $url, int $status) helper — an action named 'redirect'
+    // is an incompatible override and a fatal at class load.
+    public function redirectToProvider(Request $request, string $provider): Response
     {
         try {
             $url = auth()->getAuthorizationUrl($provider);

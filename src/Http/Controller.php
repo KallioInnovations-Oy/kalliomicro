@@ -108,22 +108,26 @@ abstract class Controller
     /**
      * Render a view and return as ApiResponse action
      *
+     * Renders as a partial for the same reason renderPartial() does: the output
+     * goes into a DOM target, so a template calling extends() must not drag the
+     * page layout in with it. This used to call render() and was the second
+     * door to the <!DOCTYPE html>-in-a-modal bug fixed in 1.2.0.
+     *
      * @param array<string, mixed> $data
      */
     protected function renderToResponse(string $template, string $target, array $data = []): ApiResponse
     {
-        if ($this->view === null) {
-            throw new \RuntimeException('View engine not configured');
-        }
-
-        $content = $this->view->render($template, $this->prepareViewData($data));
-
         return ApiResponse::success()
-            ->replace($target, $content);
+            ->replace($target, $this->renderPartial($template, $data));
     }
 
     /**
-     * Render a partial/component
+     * Render a partial/component — no layout, whatever the template asks for
+     *
+     * This is the documented way to build modal content, so it must ignore
+     * extends(): rendering through render() wrapped a template that called
+     * extends() in the full page layout and injected a whole <!DOCTYPE html>
+     * document into the modal body.
      *
      * @param array<string, mixed> $data
      */
@@ -133,7 +137,7 @@ abstract class Controller
             throw new \RuntimeException('View engine not configured');
         }
 
-        return $this->view->render($template, $this->prepareViewData($data));
+        return $this->view->partial($template, $this->prepareViewData($data));
     }
 
     /**
@@ -170,11 +174,27 @@ abstract class Controller
 
     /**
      * Create a redirect back response
+     *
+     * The Referer header is client-supplied: a cross-origin referer falls back
+     * to '/', and even a same-origin one is reduced to path + query so this
+     * can never become an open redirect.
      */
     protected function back(): Response
     {
         $referer = $this->request->header('referer', '/');
-        return Response::redirect($referer);
+
+        // parse_url on both sides: handles ports and bracketed IPv6 hosts
+        // uniformly ('[::1]:8080' → '::1'), and a missing Host header parses
+        // to null rather than crashing the comparison.
+        $refHost = parse_url($referer, PHP_URL_HOST);
+        $hostHeader = (string) $this->request->header('host', '');
+        $reqHost = $hostHeader === '' ? null : parse_url('http://' . $hostHeader, PHP_URL_HOST);
+
+        if (is_string($refHost) && strtolower($refHost) !== strtolower((string) $reqHost)) {
+            return Response::redirect('/');
+        }
+
+        return Response::redirect(Session::sanitizeRelativeUrl($referer));
     }
 
     // Request helpers
@@ -297,7 +317,11 @@ abstract class Controller
             'date' => $this->validateDate($field, $value),
             'regex' => $this->validateRegex($field, $value, $params[0] ?? ''),
             // A typo'd rule name silently passing is worse than an exception in dev
-            default => throw new \InvalidArgumentException("Unknown validation rule: {$rule}"),
+            default => throw new \InvalidArgumentException(
+                "Unknown validation rule: {$rule}. Shipped rules: required, email, numeric, integer, "
+                . "string, min, max, between, in, confirmed, url, date, regex. Database-aware rules "
+                . "(unique/exists) are intentionally not shipped — see docs/validation.md."
+            ),
         };
     }
 

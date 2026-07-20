@@ -28,7 +28,7 @@ class Console
     /** @var array<string, Command> */
     private array $commands = [];
 
-    /** @var array<string, array{command: string, schedule: string}> */
+    /** @var array<int, array{command: string, schedule: string}> */
     private array $scheduledTasks = [];
 
     private bool $useColors = true;
@@ -80,15 +80,18 @@ class Console
     /**
      * Schedule a command to run on a cron schedule
      *
-     * Policy note: schedule:run provides NO overlap protection — a task that
-     * runs longer than its interval gets a second concurrent instance on the
-     * next tick. Slow or non-idempotent tasks must take their own lock (e.g.
-     * MySQL GET_LOCK held by the DB connection, which auto-releases if the
-     * process dies) at the start of handle().
+     * The same command may be scheduled more than once (different
+     * expressions); every entry runs when due.
+     *
+     * Overlap: schedule:run holds a per-task flock while a task executes, so
+     * a task that outlives its interval is skipped (not doubled) on the next
+     * tick on the same host. The lock is host-local — a deployment running
+     * schedule:run on multiple hosts still needs a distributed lock (e.g.
+     * MySQL GET_LOCK held by the DB connection) inside handle().
      */
     public function schedule(string $commandName, string $cronExpression): self
     {
-        $this->scheduledTasks[$commandName] = [
+        $this->scheduledTasks[] = [
             'command' => $commandName,
             'schedule' => $cronExpression,
         ];
@@ -99,7 +102,7 @@ class Console
     /**
      * Get all scheduled tasks
      *
-     * @return array<string, array{command: string, schedule: string}>
+     * @return array<int, array{command: string, schedule: string}>
      */
     public function getScheduledTasks(): array
     {

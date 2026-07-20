@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KallioMicro\Database;
 
+use InvalidArgumentException;
 use PDO;
 use PDOException;
 use PDOStatement;
@@ -58,13 +59,7 @@ class Connection
     private function connect(): void
     {
         $dsn = $this->buildDsn();
-
-        $options = array_merge([
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-            PDO::ATTR_STRINGIFY_FETCHES => false,
-        ], $this->config['options']);
+        $options = $this->buildOptions();
 
         try {
             $this->pdo = new PDO(
@@ -74,10 +69,15 @@ class Connection
                 $options
             );
 
-            // Set charset for MySQL
+            // Set charset for MySQL. SET NAMES takes no placeholders, so this
+            // is the one statement in the class built by interpolation — hence
+            // the validation. The values come from config rather than a
+            // request, so this is not a live injection route; it is here so the
+            // "no interpolation, ever" rule the rest of the class follows has
+            // no exception a reader has to reason about.
             if ($this->config['driver'] === 'mysql') {
-                $charset = $this->config['charset'];
-                $collation = $this->config['collation'];
+                $charset = $this->validateCharsetToken($this->config['charset'], 'charset');
+                $collation = $this->validateCharsetToken($this->config['collation'], 'collation');
                 $this->pdo->exec("SET NAMES '{$charset}' COLLATE '{$collation}'");
             }
         } catch (PDOException $e) {
@@ -124,8 +124,14 @@ class Connection
     {
         $statement = $this->getPdo()->prepare($sql);
         $this->bindValues($statement, $bindings);
-        $statement->execute();
+
+        // Assigned BEFORE execute(): a throwing statement used to leave
+        // lastStatement pointing at the previous one, so affectedRows() went on
+        // reporting that statement's count. A stale number is worse than zero,
+        // because it looks like a successful write.
         $this->lastStatement = $statement;
+
+        $statement->execute();
 
         return $statement;
     }
@@ -226,6 +232,12 @@ class Connection
      */
     public function update(string $table, array $data, array $where): int
     {
+        if ($where === []) {
+            throw new RuntimeException(
+                'Refusing to UPDATE without conditions; use query() with explicit SQL to deliberately affect all rows.'
+            );
+        }
+
         $setParts = [];
         $bindings = [];
 
@@ -261,6 +273,12 @@ class Connection
      */
     public function delete(string $table, array $where): int
     {
+        if ($where === []) {
+            throw new RuntimeException(
+                'Refusing to DELETE without conditions; use query() with explicit SQL to deliberately affect all rows.'
+            );
+        }
+
         $whereParts = [];
         $bindings = [];
 
@@ -315,6 +333,13 @@ class Connection
     /**
      * Execute a callback within a transaction
      *
+     * Dispatches through $this->beginTransaction()/commit()/rollback() rather
+     * than reaching for the PDO handle directly. That indirection is CONTRACT,
+     * not incidental: it is what lets a Connection subclass implement savepoint
+     * nesting (a named construction seam in docs/conventions.md). Inlining
+     * $this->getPdo()->beginTransaction() here would silently break every such
+     * subclass.
+     *
      * @template T
      * @param callable(): T $callback
      * @return T
@@ -328,7 +353,20 @@ class Connection
             $this->commit();
             return $result;
         } catch (\Throwable $e) {
-            $this->rollback();
+            // A failing commit() leaves no active transaction, so rollback()
+            // throws its own "no active transaction" — which would REPLACE the
+            // real cause and report the wrong failure. Keep the original.
+            try {
+                $this->rollback();
+            } catch (\Throwable $rollbackFailure) {
+                throw new RuntimeException(
+                    'Transaction failed and could not be rolled back: ' . $e->getMessage()
+                    . ' (rollback also failed: ' . $rollbackFailure->getMessage() . ')',
+                    (int) $e->getCode(),
+                    $e
+                );
+            }
+
             throw $e;
         }
     }
@@ -350,21 +388,93 @@ class Connection
     }
 
     /**
+     * PDO driver options: the framework's defaults, overridden by config
+     *
+     * MUST NOT use array_merge(). PDO attributes are integer constants, and
+     * array_merge RENUMBERS integer keys — so `[ATTR_ERRMODE => EXCEPTION,
+     * ATTR_DEFAULT_FETCH_MODE => FETCH_ASSOC, ATTR_EMULATE_PREPARES => false,
+     * ATTR_STRINGIFY_FETCHES => false]` came out as keys 0,1,2,3 with the
+     * original values still in order. Every setting landed on the wrong
+     * attribute, and the damage was silent:
+     *
+     *   - key 3 IS ATTR_ERRMODE, and it received `false` — that is
+     *     ERRMODE_SILENT, so PDO stopped throwing on SQL errors entirely.
+     *   - ATTR_EMULATE_PREPARES never arrived, leaving MySQL on PDO's default
+     *     of emulated prepares, contradicting this framework's documented
+     *     "native prepared statements" guarantee.
+     *   - ATTR_DEFAULT_FETCH_MODE never arrived, so rows came back FETCH_BOTH.
+     *   - a downstream's own options were renumbered too, which is why
+     *     configuring something like MYSQL_ATTR_FOUND_ROWS had no effect.
+     *
+     * array_replace() preserves integer keys and gives config the last word.
+     *
+     * @return array<int, mixed>
+     */
+    private function buildOptions(): array
+    {
+        $defaults = [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false,
+            PDO::ATTR_STRINGIFY_FETCHES => false,
+        ];
+
+        $configured = $this->config['options'];
+
+        return is_array($configured) ? array_replace($defaults, $configured) : $defaults;
+    }
+
+    /**
+     * Validate a charset or collation name before it is interpolated
+     *
+     * @throws InvalidArgumentException when it is not a bare MySQL name
+     */
+    private function validateCharsetToken(mixed $value, string $what): string
+    {
+        if (!is_string($value) || !preg_match('/^[A-Za-z0-9_]+$/', $value)) {
+            throw new InvalidArgumentException(sprintf(
+                'Database %s must be a bare name matching [A-Za-z0-9_]+, %s given.',
+                $what,
+                is_string($value) ? "'{$value}'" : get_debug_type($value)
+            ));
+        }
+
+        return $value;
+    }
+
+    /**
      * Quote an identifier (table/column name)
+     *
+     * This is a quoting mechanism, not a validator — callers still validate
+     * shape first (QueryBuilder::validateIdentifier()). It fails closed: an
+     * identifier it cannot safely quote raises rather than passing through.
+     *
+     * @throws InvalidArgumentException when the identifier cannot be quoted
      */
     public function quoteIdentifier(string $identifier): string
     {
-        // Handle table.column notation
+        // The wildcard is not an identifier and must not be backticked —
+        // `*` means a column literally named '*' and is never what was meant.
+        if ($identifier === '*') {
+            return '*';
+        }
+
+        // Handle table.column notation (including table.*)
         if (str_contains($identifier, '.')) {
             return implode('.', array_map([$this, 'quoteIdentifier'], explode('.', $identifier)));
         }
 
-        // Don't quote if it's already quoted or contains special characters (like aliases)
+        // Previously these were returned unquoted AND unescaped to accommodate
+        // aliases, which made the method an injection passthrough for exactly
+        // the inputs that matter. Aliases belong in a RawExpression.
         if (str_contains($identifier, '`') || str_contains($identifier, ' ')) {
-            return $identifier;
+            throw new InvalidArgumentException(
+                "Cannot quote identifier containing a backtick or space: {$identifier}. "
+                . 'Use RawExpression for aliases and expressions.'
+            );
         }
 
-        return '`' . str_replace('`', '``', $identifier) . '`';
+        return '`' . $identifier . '`';
     }
 
     /**
@@ -376,6 +486,19 @@ class Connection
     {
         foreach ($bindings as $key => $value) {
             $param = is_int($key) ? $key + 1 : ":{$key}";
+
+            // An array or object binding used to reach PDO and stringify to
+            // the literal 'Array' (with a notice), writing that into the
+            // column. Almost always a forgotten whereIn() or a mis-shaped
+            // payload — say so rather than persisting nonsense.
+            if (!is_scalar($value) && $value !== null) {
+                throw new InvalidArgumentException(sprintf(
+                    'Binding [%s] must be scalar or null, %s given. '
+                    . 'Use whereIn() for a list of values.',
+                    is_int($key) ? "#{$param}" : $key,
+                    get_debug_type($value)
+                ));
+            }
 
             $type = match (true) {
                 is_int($value) => PDO::PARAM_INT,

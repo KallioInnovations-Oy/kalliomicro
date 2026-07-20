@@ -12,6 +12,9 @@
 *.swp
 *.swo
 
+# Local AI-agent tooling — never part of the framework (see docs/conventions.md)
+/.claude/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -22,6 +25,10 @@ Thumbs.db
 # Cache
 /storage/cache/*
 !/storage/cache/.gitkeep
+/.phpunit.cache/
+
+# Scheduler locks
+/storage/framework/*.lock
 
 # Sessions
 /storage/sessions/*

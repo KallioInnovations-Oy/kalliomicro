@@ -16,12 +16,13 @@ $router->group(['prefix' => '/api'], function (Router $router) {
     // Public API endpoints
     $router->get('/health', function () {
         return \KallioMicro\Http\ApiResponse::success('OK')
-            ->withData(['status' => 'healthy', 'version' => '1.0.0'])
+            ->withData(['status' => 'healthy', 'version' => \KallioMicro\Core\Application::version()])
             ->toResponse();
     });
 
-    // Protected API endpoints
-    $router->group(['middleware' => [/* ApiAuthMiddleware */]], function (Router $router) {
+    // Protected API endpoints — AuthMiddleware returns 401 JSON for
+    // wantsJson() requests instead of redirecting to the login page
+    $router->group(['middleware' => [KallioMicro\Middleware\AuthMiddleware::class]], function (Router $router) {
 
         // Example: Assessment API
         $router->get('/assessments', [App\Controllers\Api\AssessmentApiController::class, 'index']);

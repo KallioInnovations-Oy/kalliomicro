@@ -6,12 +6,16 @@ namespace KallioMicro\Core;
 
 use KallioMicro\Core\Container;
 use KallioMicro\Core\Config;
+use KallioMicro\Http\HttpException;
 use KallioMicro\Http\Request;
 use KallioMicro\Http\Response;
+use KallioMicro\Support\ExceptionHandler;
+use KallioMicro\Support\Logger;
 use KallioMicro\Routing\Router;
 use KallioMicro\Database\Connection;
 use KallioMicro\View\ViewEngine;
 use KallioMicro\Auth\Session;
+use KallioMicro\Middleware\MiddlewareInterface;
 use Closure;
 use Throwable;
 
@@ -23,7 +27,7 @@ use Throwable;
  */
 class Application extends Container
 {
-    private const VERSION = '1.0.0';
+    private const VERSION = '1.2.4';
 
     private static ?Application $instance = null;
 
@@ -33,7 +37,7 @@ class Application extends Container
     /** @var array<class-string, Closure> */
     private array $bootCallbacks = [];
 
-    /** @var array<Closure> */
+    /** @var array<int, Closure|string> */
     private array $middleware = [];
 
     public function __construct(string $basePath)
@@ -103,16 +107,17 @@ class Application extends Container
 
         // Request
         $this->singleton(Request::class, function () {
-            return Request::capture();
+            $request = Request::capture();
+            $request->setTrustedProxies(
+                (array) $this->make(Config::class)->get('app.trusted_proxies', [])
+            );
+            return $request;
         });
         $this->alias(Request::class, 'request');
 
         // View Engine
         $this->singleton(ViewEngine::class, function () {
-            return new ViewEngine(
-                $this->resourcePath('views'),
-                $this->storagePath('cache/views')
-            );
+            return new ViewEngine($this->resourcePath('views'));
         });
         $this->alias(ViewEngine::class, 'view');
 
@@ -141,8 +146,12 @@ class Application extends Container
 
     /**
      * Add global middleware
+     *
+     * Accepts a Closure(Request, Closure): Response, or a class-string of a
+     * MiddlewareInterface implementation (resolved through the container when
+     * the request is handled). Parameterized middleware use the closure form.
      */
-    public function middleware(Closure $middleware): self
+    public function middleware(Closure|string $middleware): self
     {
         $this->middleware[] = $middleware;
         return $this;
@@ -169,7 +178,62 @@ class Application extends Container
             $callback($this);
         }
 
+        $this->applyTimezone();
+
+        // Default file logger, so an unconfigured application still records
+        // its own failures. Bind your own (database-backed, a different
+        // channel) and the error handler below picks it up.
+        if (!$this->has(Logger::class)) {
+            $this->singleton(Logger::class, fn (): Logger => new Logger());
+        }
+
+        // Default error renderer, registered only if nothing else claimed the
+        // binding — a boot callback that binds its own (custom renderer, hidden
+        // paths, a logger) wins. Autowiring would otherwise construct one with
+        // the constructor's debug=false and never show a debug page.
+        //
+        // The Logger is passed explicitly: without one, report() has nowhere to
+        // write and every handled exception is silently discarded.
+        if (!$this->has(ExceptionHandler::class)) {
+            $this->singleton(ExceptionHandler::class, function (): ExceptionHandler {
+                $debug = (bool) $this->make(Config::class)->get('app.debug', false);
+                return new ExceptionHandler($this->make(Logger::class), null, $debug);
+            });
+        }
+
         $this->booted = true;
+    }
+
+    /**
+     * Apply config('app.timezone') to PHP's default timezone
+     *
+     * `app.timezone` shipped in config/app.php from the start and nothing ever
+     * read it — every date() call in every downstream silently used whatever
+     * php.ini said instead. A config key that does nothing is worse than an
+     * absent one: it reads as a setting that has been made.
+     *
+     * An unknown identifier raises rather than falling back, because the
+     * failure it prevents is a whole application quietly running on the wrong
+     * clock — the same hazard as the unasserted session time zone in
+     * docs/database.md.
+     */
+    private function applyTimezone(): void
+    {
+        $timezone = $this->make(Config::class)->get('app.timezone');
+
+        if ($timezone === null || $timezone === '') {
+            return;
+        }
+
+        if (!is_string($timezone) || !in_array($timezone, timezone_identifiers_list(), true)) {
+            throw new \InvalidArgumentException(sprintf(
+                'config(\'app.timezone\') must be a valid timezone identifier, %s given. '
+                . 'Use an IANA name such as "Europe/Helsinki" or "UTC".',
+                is_string($timezone) ? "'{$timezone}'" : get_debug_type($timezone)
+            ));
+        }
+
+        date_default_timezone_set($timezone);
     }
 
     /**
@@ -180,21 +244,31 @@ class Application extends Container
         try {
             $this->boot();
 
-            // Run through middleware stack
-            $response = $this->runMiddleware($request, function (Request $request) {
-                return $this->dispatchToRouter($request);
+            // The destination catches its own exceptions so the error response
+            // travels back out through the global middleware stack. Built
+            // outside it, error responses silently lose whatever global
+            // middleware adds — security headers being the usual casualty, on
+            // exactly the responses an attacker is most likely to provoke.
+            return $this->runMiddleware($request, function (Request $request) {
+                try {
+                    return $this->dispatchToRouter($request);
+                } catch (Throwable $e) {
+                    return $this->handleException($e, $request);
+                }
             });
-
-            return $response;
         } catch (Throwable $e) {
+            // Last resort: boot() failed, or a middleware threw before calling
+            // $next. Nothing can run the pipeline for us here.
             return $this->handleException($e, $request);
         }
     }
 
     private function runMiddleware(Request $request, Closure $destination): Response
     {
+        $middleware = array_map($this->resolveMiddleware(...), $this->middleware);
+
         $pipeline = array_reduce(
-            array_reverse($this->middleware),
+            array_reverse($middleware),
             function (Closure $next, Closure $middleware) {
                 return function (Request $request) use ($next, $middleware) {
                     return $middleware($request, $next);
@@ -206,38 +280,115 @@ class Application extends Container
         return $pipeline($request);
     }
 
+    /**
+     * Normalize a middleware entry to a pipeline closure
+     *
+     * Single owner of the "what counts as valid middleware" contract — the
+     * Router delegates here so route and global middleware can never drift.
+     * Class-strings resolve through the container lazily, at invocation: a
+     * middleware behind one that short-circuits is never constructed.
+     */
+    public function resolveMiddleware(Closure|string $middleware): Closure
+    {
+        if ($middleware instanceof Closure) {
+            return $middleware;
+        }
+
+        return function (Request $request, Closure $next) use ($middleware): Response {
+            $instance = $this->make($middleware);
+
+            if (!$instance instanceof MiddlewareInterface) {
+                throw new \RuntimeException(sprintf(
+                    'Middleware [%s] must implement %s or be a Closure(Request, Closure): Response.',
+                    $middleware,
+                    MiddlewareInterface::class
+                ));
+            }
+
+            return $instance->handle($request, $next);
+        };
+    }
+
     private function dispatchToRouter(Request $request): Response
     {
         $router = $this->make(Router::class);
         return $router->dispatch($request);
     }
 
+    /**
+     * Render a thrown exception to a Response
+     *
+     * Delegates to ExceptionHandler, which is the single owner of error
+     * rendering: it escapes the debug page, strips `args` from the trace, and
+     * gates every message on debug alone. This method previously carried a
+     * second, weaker copy of that logic — unescaped HTML, a raw trace on the
+     * JSON path, and a `$status < 500` branch that leaked internal exception
+     * messages to clients in production.
+     *
+     * ExceptionHandler is resolved from the container so a downstream project
+     * can swap or configure it (custom renderer, hidden paths) via instance().
+     */
     private function handleException(Throwable $e, Request $request): Response
     {
-        $config = $this->make(Config::class);
-        $debug = $config->get('app.debug', false);
+        $handler = $this->make(ExceptionHandler::class);
 
-        if ($request->expectsJson()) {
-            return Response::json([
-                'error' => true,
-                'message' => $debug ? $e->getMessage() : 'Internal Server Error',
-                'trace' => $debug ? $e->getTrace() : null,
-            ], 500);
+        // Report before rendering. Only ExceptionHandler's globally-registered
+        // path logged, and public/index.php does not register it — so a
+        // production 500 was rendered to the visitor and left no trace anywhere.
+        //
+        // Guarded even though report() swallows its own failures: a downstream
+        // handler that logs to the database is a normal thing to bind, and the
+        // database being down is a normal reason for the 500 in the first
+        // place. A reporter that throws must not cost the visitor the error page.
+        try {
+            $handler->report($e);
+        } catch (Throwable) {
+            // Reporting is best-effort; rendering is not.
         }
 
-        $message = $debug
-            ? sprintf('<h1>Error</h1><pre>%s</pre><pre>%s</pre>', $e->getMessage(), $e->getTraceAsString())
-            : '<h1>500 - Internal Server Error</h1>';
+        // requireCsrf() (403), HttpException::notFound() (404), etc. must
+        // surface at their declared status — a blanket 500 breaks the
+        // documented "abort with a specific HTTP status from anywhere" path.
+        $response = $handler->render($e, $request->expectsJson());
 
-        return Response::html($message, 500);
+        if ($e instanceof HttpException) {
+            foreach ($e->getHeaders() as $name => $value) {
+                $response->header($name, $value);
+            }
+        }
+
+        return $response;
     }
 
     /**
-     * Terminate the application
+     * Post-response hook — EXTENSION POINT, empty by design
+     *
+     * The last thing run() does, after the response has been sent. It exists
+     * for work that should not sit between the handler and the client:
+     * flushing metrics, closing a queue connection, writing an access record,
+     * pruning a cache. Both the Request and the Response are passed so a
+     * subclass can see what was actually served (status, headers, timing).
+     *
+     * The base ships no implementation because it has no such work — this is a
+     * mechanism, and what belongs after the response is the deployment's to
+     * decide. Override it on an Application subclass:
+     *
+     *     final class Kernel extends Application
+     *     {
+     *         public function terminate(Request $request, Response $response): void
+     *         {
+     *             $this->make(MetricsSink::class)->record($request, $response);
+     *         }
+     *     }
+     *
+     * ⚠ "After the response is sent" is not the same as "off the request
+     * clock". PHP only truly detaches the client under FPM, and only when
+     * something calls fastcgi_finish_request(); under mod_php, the built-in
+     * server or the CLI SAPI the browser is still waiting through this method.
+     * Keep the work short, or hand it to something outside the request.
      */
     public function terminate(Request $request, Response $response): void
     {
-        // Cleanup, logging, etc.
     }
 
     /**

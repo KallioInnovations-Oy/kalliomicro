@@ -13,15 +13,20 @@ use KallioMicro\Console\Input;
  * This command should be called every minute by cron:
  * * * * * * php /path/to/console schedule:run >> /dev/null 2>&1
  *
- * Scope: due tasks run inline, sequentially, with NO overlap protection —
- * the base scheduler assumes fast, idempotent tasks on a single host. A
- * task that can outlive its schedule interval must acquire its own lock
- * inside handle() (see Console::schedule() for the pattern).
+ * Due tasks run inline, sequentially, each under a per-task non-blocking
+ * flock (storage/framework/schedule-*.lock): a task still running from a
+ * previous tick is skipped, not doubled, and the kernel drops the lock if
+ * the process dies. The lock is host-local — running schedule:run on
+ * multiple hosts still requires a distributed lock inside handle() (see
+ * Console::schedule()). Lock files are never unlinked: removing a file
+ * while another process holds its lock lets two holders "lock" different
+ * inodes of the same path.
  */
 class ScheduleRunCommand extends Command
 {
     protected string $name = 'schedule:run';
     protected string $description = 'Run scheduled tasks that are due';
+    private ?string $lockDirectory = null;
     protected array $options = [
         'list' => 'Show all scheduled tasks without running them',
         'force' => 'Force run all scheduled tasks regardless of schedule',
@@ -45,12 +50,34 @@ class ScheduleRunCommand extends Command
         $currentTime = new \DateTime();
         $tasksRun = 0;
         $tasksFailed = 0;
+        $tasksSkipped = 0;
         $forceRun = $input->hasOption('force');
 
-        foreach ($tasks as $name => $task) {
-            $isDue = $forceRun || $this->isDue($task['schedule'], $currentTime);
+        foreach ($tasks as $task) {
+            $name = $task['command'];
 
-            if ($isDue) {
+            if (!$forceRun && !$this->isDue($task['schedule'], $currentTime)) {
+                continue;
+            }
+
+            // --force bypasses the due-check, never the lock. A lock-infra
+            // failure (permissions on one lock file) fails THIS task loudly
+            // but must not abort the remaining due tasks.
+            try {
+                $lock = $this->acquireLock($name);
+            } catch (\RuntimeException $e) {
+                $this->error("  {$name}: {$e->getMessage()}");
+                $tasksFailed++;
+                continue;
+            }
+
+            if ($lock === null) {
+                $this->comment("Skipping {$name}: previous run still in progress.");
+                $tasksSkipped++;
+                continue;
+            }
+
+            try {
                 $this->info("Running: {$name}");
 
                 $startTime = microtime(true);
@@ -64,23 +91,68 @@ class ScheduleRunCommand extends Command
                     $this->error("  Failed (exit code: {$result})");
                     $tasksFailed++;
                 }
+            } finally {
+                flock($lock, LOCK_UN);
+                fclose($lock);
             }
         }
 
-        if ($tasksRun === 0 && $tasksFailed === 0) {
+        if ($tasksRun === 0 && $tasksFailed === 0 && $tasksSkipped === 0) {
             $this->comment('No scheduled tasks are due.');
         } else {
             $this->line('');
-            $this->info("Tasks run: {$tasksRun}, Failed: {$tasksFailed}");
+            $this->info("Tasks run: {$tasksRun}, Failed: {$tasksFailed}, Skipped: {$tasksSkipped}");
         }
 
         return $tasksFailed > 0 ? 1 : 0;
     }
 
     /**
+     * Acquire the per-task overlap lock, or report the task as still running.
+     *
+     * @return resource|null Lock handle to release after execution, or null
+     *                       when a previous run of the task still holds it.
+     */
+    private function acquireLock(string $taskName)
+    {
+        $dir = $this->lockDirectory ??= $this->ensureLockDirectory();
+
+        // 'task:backup' → 'task-backup'; the md5 suffix keeps sanitized
+        // collisions ('a:b' vs 'a-b') on distinct lock files.
+        $safe = preg_replace('/[^A-Za-z0-9_\-]+/', '-', $taskName);
+        $path = $dir . '/schedule-' . $safe . '-' . substr(md5($taskName), 0, 8) . '.lock';
+
+        $handle = fopen($path, 'c'); // create-or-open, never truncates
+        if ($handle === false) {
+            throw new \RuntimeException(
+                "Unable to open scheduler lock file {$path}; check storage/framework permissions."
+            );
+        }
+
+        if (!flock($handle, LOCK_EX | LOCK_NB)) {
+            fclose($handle);
+            return null;
+        }
+
+        return $handle;
+    }
+
+    private function ensureLockDirectory(): string
+    {
+        $dir = $this->app()->storagePath('framework');
+        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+            throw new \RuntimeException(
+                "Unable to create scheduler lock directory {$dir}; check storage/ permissions."
+            );
+        }
+
+        return $dir;
+    }
+
+    /**
      * List all scheduled tasks
      *
-     * @param array<string, array{command: string, schedule: string}> $tasks
+     * @param array<int, array{command: string, schedule: string}> $tasks
      */
     private function listScheduledTasks(array $tasks): int
     {
@@ -91,11 +163,11 @@ class ScheduleRunCommand extends Command
         $rows = [];
         $currentTime = new \DateTime();
 
-        foreach ($tasks as $name => $task) {
+        foreach ($tasks as $task) {
             $isDue = $this->isDue($task['schedule'], $currentTime) ? 'Yes' : 'No';
             $nextRun = $this->getNextRunTime($task['schedule']);
 
-            $rows[] = [$name, $task['schedule'], $isDue, $nextRun];
+            $rows[] = [$task['command'], $task['schedule'], $isDue, $nextRun];
         }
 
         $this->table(['Command', 'Schedule', 'Due Now', 'Next Run'], $rows);
@@ -129,47 +201,72 @@ class ScheduleRunCommand extends Command
      */
     private function matchesField(string $field, int $value): bool
     {
-        // Wildcard
-        if ($field === '*') {
-            return true;
-        }
+        // The list separator splits FIRST. Testing '/' or '-' against the
+        // whole field made a mixed field never reach the list branch:
+        // explode('-', '1,3-5', 2) yields start '1,3' → 1, so '0 1,3-5 * * *'
+        // was due at 02:00 and '0 1-5,10 * * *' was not due at 10:00 — a task
+        // running at a time it was never scheduled for.
+        $elements = explode(',', $field);
 
-        // Exact match
-        if (ctype_digit($field)) {
-            return (int) $field === $value;
-        }
+        // Validate every element before matching any: docs/console.md promises
+        // a field outside the grammar silently isn't due rather than crashing,
+        // and one bad element must not be masked by a good sibling matching
+        // ('5,*/0' stays never-due, as documented). The step is required
+        // non-zero here, which is also what keeps matchesElement()'s modulo
+        // away from a DivisionByZeroError that would kill the whole tick.
+        $step = '(?:/0*[1-9]\d*)';
 
-        // Range: 1-5
-        if (str_contains($field, '-')) {
-            [$start, $end] = explode('-', $field, 2);
-            return $value >= (int) $start && $value <= (int) $end;
-        }
-
-        // List: 1,3,5
-        if (str_contains($field, ',')) {
-            $values = array_map('intval', explode(',', $field));
-            return in_array($value, $values, true);
-        }
-
-        // Step: */5 or 0-30/5
-        if (str_contains($field, '/')) {
-            [$range, $step] = explode('/', $field, 2);
-            $step = (int) $step;
-
-            if ($range === '*') {
-                return $value % $step === 0;
+        foreach ($elements as $element) {
+            if (preg_match("#^(?:\*{$step}?|\d+(?:-\d+{$step}?)?)$#", $element) !== 1) {
+                return false;
             }
+        }
 
-            if (str_contains($range, '-')) {
-                [$start, $end] = explode('-', $range, 2);
-                if ($value < (int) $start || $value > (int) $end) {
-                    return false;
-                }
-                return ($value - (int) $start) % $step === 0;
+        foreach ($elements as $element) {
+            if ($this->matchesElement($element, $value)) {
+                return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * Match one comma-free cron element: '*', '5', 'a-b', '*' + '/n', 'a-b/n'.
+     *
+     * Only ever called on elements matchesField() has already validated,
+     * so the step is known to be a positive integer.
+     */
+    private function matchesElement(string $element, int $value): bool
+    {
+        if ($element === '*') {
+            return true;
+        }
+
+        if (ctype_digit($element)) {
+            return (int) $element === $value;
+        }
+
+        $step = 1;
+
+        // Step is stripped before the range is read, or '0-30/5' is misread
+        // as the range '0-30' with the step silently ignored.
+        if (str_contains($element, '/')) {
+            [$element, $stepPart] = explode('/', $element, 2);
+            $step = (int) $stepPart;
+        }
+
+        if ($element === '*') {
+            return $value % $step === 0;
+        }
+
+        [$start, $end] = explode('-', $element, 2);
+
+        if ($value < (int) $start || $value > (int) $end) {
+            return false;
+        }
+
+        return ($value - (int) $start) % $step === 0;
     }
 
     /**
