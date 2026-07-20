@@ -75,7 +75,7 @@ This repository is a copy-template — projects are created by copying it and bu
 
 1. **Treat `src/` as read-only vendored framework code.** Framework changes go to the base repository, not your copy — a local patch is lost knowledge and blocks future re-syncs.
 2. **Before reporting a framework bug:** check `KallioMicro\Core\Application::version()` against the base [CHANGELOG.md](../CHANGELOG.md) (your copy may predate a fix), and read the matching `docs/` chapter — ⚠ markers are *known* sharp edges, and scope notes mark functionality absent **by design**.
-3. **A missing Laravel feature is a scope boundary, not a bug.** The API mimics Laravel's vocabulary on purpose ("Laravel light"), but the surface is deliberately smaller; unknown validation rules and QueryBuilder methods throw self-describing exceptions stating the boundary — trust those messages over Laravel habits.
+3. **A missing Laravel feature is a scope boundary, not a bug.** The API mimics Laravel's vocabulary on purpose so its conventions feel familiar, but the surface is deliberately smaller; unknown validation rules and QueryBuilder methods throw self-describing exceptions stating the boundary — trust those messages over Laravel habits.
 
 ## Extension guidance for downstream projects
 

@@ -241,7 +241,7 @@ public function clone(): self
 
 ### Unknown methods — the Laravel boundary
 
-Calling any method the builder doesn't ship throws `BadMethodCallException` with a self-describing message. Common Laravel methods (`find`, `firstOrFail`, `chunk`, `with`, `whereHas`, `insertGetId`, `updateOrInsert`, `selectRaw`, `orderByRaw`, `when`) get a hint naming the local equivalent; everything else points here. This is deliberate — the builder is "Laravel light", not Laravel; a missing Laravel method is a scope boundary, not a bug.
+Calling any method the builder doesn't ship throws `BadMethodCallException` with a self-describing message. Common Laravel methods (`find`, `firstOrFail`, `chunk`, `with`, `whereHas`, `insertGetId`, `updateOrInsert`, `selectRaw`, `orderByRaw`, `when`) get a hint naming the local equivalent; everything else points here. This is deliberate — the builder borrows Laravel's method vocabulary without matching its surface; a missing Laravel method is a scope boundary, not a bug.
 
 ### RawExpression
 
