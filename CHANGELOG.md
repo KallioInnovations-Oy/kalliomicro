@@ -7,6 +7,27 @@ newer base.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.0] – 2026-07-20
+
+Open-source release. The framework is now published under the MIT license at
+[kallioinnovations-oy/kalliomicro](https://github.com/kallioinnovations-oy/kalliomicro).
+No code behavior changes beyond the renamed defaults below.
+
+### Changed
+
+- **License: proprietary → MIT** (`LICENSE`, `composer.json`, README).
+  Copyright (c) 2026 KallioInnovations Oy.
+- **Legacy-flavored config defaults renamed.** All are env-overridable, so
+  deployments that set the variables are unaffected; only a deployment relying
+  on the literal default sees a change (for the session cookie, users get a
+  fresh session on next visit):
+
+  | Setting | Old default | New default |
+  |---|---|---|
+  | `session.cookie` (`SESSION_COOKIE`) | `meso_session` | `kalliomicro_session` |
+  | `database.connections.mysql.database` (`DB_DATABASE`) | `meso_production` | `kalliomicro` |
+  | `database.connections.dwh.database` (`DWH_DATABASE`) | `meso_dwh` | `kalliomicro_dwh` |
+
 ## [1.2.5] – 2026-07-20
 
 ### Fixed

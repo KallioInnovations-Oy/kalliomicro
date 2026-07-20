@@ -70,7 +70,7 @@ Service-account bind → search (`user_filter`, default `(sAMAccountName={userna
 
 ## Session
 
-`KallioMicro\Auth\Session` wraps **native PHP `$_SESSION`** with secure defaults from `config/session.php`: strict mode, cookie-only, HttpOnly, `SameSite=Lax`, Secure (default on), cookie name `meso_session`, lifetime 120 min, id regeneration every 300 s and on every privilege change. All accessors lazily `start()`.
+`KallioMicro\Auth\Session` wraps **native PHP `$_SESSION`** with secure defaults from `config/session.php`: strict mode, cookie-only, HttpOnly, `SameSite=Lax`, Secure (default on), cookie name `kalliomicro_session`, lifetime 120 min, id regeneration every 300 s and on every privilege change. All accessors lazily `start()`.
 
 ```php
 // data:   get / set / has / forget / all

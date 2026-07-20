@@ -2,7 +2,7 @@
     "name": "kalliomicro/framework",
     "description": "KallioMicro Framework - A minimal, secure PHP 8+ MVC framework",
     "type": "project",
-    "license": "proprietary",
+    "license": "MIT",
     "minimum-stability": "stable",
     "require": {
         "php": "^8.1",

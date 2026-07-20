@@ -391,4 +391,4 @@ In debug mode, exceptions show detailed stack traces. In production, users see f
 
 ## License
 
-Proprietary - Mesvac Oy
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 KallioInnovations Oy.

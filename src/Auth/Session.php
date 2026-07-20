@@ -81,7 +81,7 @@ class Session
             'samesite' => $sameSite,
         ]);
 
-        $sessionName = $this->config->get('session.cookie', 'meso_session');
+        $sessionName = $this->config->get('session.cookie', 'kalliomicro_session');
         session_name($sessionName);
     }
 
